@@ -17,7 +17,7 @@ from AppKit import (
 	NSMenu, NSMenuItem,
 	NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn,
 	NSSavePanel, NSOpenPanel, NSModalResponseOK,
-	NSEvent, NSKeyDownMask,
+	NSEvent, NSKeyDownMask, NSEventModifierFlagCommand,
 	NSDragOperationMove,
 	NSTableViewDropAbove,
 	NSPasteboardItem,
@@ -29,6 +29,7 @@ from Foundation import (
 	NSPropertyListXMLFormat_v1_0,
 	NSData, NSURL,
 )
+import GlyphsApp as _GlyphsAppModule
 from GlyphsApp import Glyphs
 
 
@@ -37,13 +38,13 @@ from GlyphsApp import Glyphs
 SCRIPTS_FOLDER = os.path.expanduser("~/Library/Application Support/Glyphs 3/Scripts")
 ROW_HEIGHT = 28
 BOTTOM_BAR_HEIGHT = 36
-DRAG_COL_WIDTH = 24
-DONE_COL_WIDTH = 28
-PLAY_COL_WIDTH = 38
+DRAG_COL_WIDTH = 20
+DONE_COL_WIDTH = 22
+PLAY_COL_WIDTH = 44
 SCROLLBAR_WIDTH = 16
 INSET = 8
 MIN_TITLE_WIDTH = 80
-MIN_WINDOW_WIDTH = DRAG_COL_WIDTH + DONE_COL_WIDTH + MIN_TITLE_WIDTH + PLAY_COL_WIDTH + SCROLLBAR_WIDTH + 24
+MIN_WINDOW_WIDTH = DRAG_COL_WIDTH + DONE_COL_WIDTH + MIN_TITLE_WIDTH + PLAY_COL_WIDTH + SCROLLBAR_WIDTH + 20
 MIN_WINDOW_HEIGHT = ROW_HEIGHT * 2 + ROW_HEIGHT // 2 + BOTTOM_BAR_HEIGHT + 22
 
 SELF_NAME = "Script Juggler"
@@ -167,11 +168,13 @@ def matchesSearchTerms(displayPath, terms):
 
 
 def runScript(path):
-	"""Execute a Glyphs Python script in an isolated namespace."""
+	"""Execute a Glyphs Python script with the full GlyphsApp namespace available."""
 	try:
 		with open(path, "r", encoding="utf-8", errors="replace") as f:
 			source = f.read()
-		namespace = {"__file__": path, "__name__": "__main__"}
+		namespace = {k: v for k, v in vars(_GlyphsAppModule).items() if not k.startswith("_")}
+		namespace["__file__"] = path
+		namespace["__name__"] = "__main__"
 		exec(compile(source, path, "exec"), namespace)  # noqa: S102
 	except Exception:
 		print(f"Script Juggler: error running {os.path.basename(path)}:\n{traceback.format_exc()}")
@@ -304,7 +307,7 @@ try:
 
 		def tableView_pasteboardWriterForRow_(self, tableView, row):
 			item = NSPasteboardItem.alloc().init()
-			item.setString_forType_(str(row), "public.data")
+			item.setString_forType_(str(row), _DRAG_TYPE)
 			return item
 
 		# ── drag destination: validate ──────────────────────────────────────────
@@ -322,9 +325,9 @@ try:
 			if not pasteboardItems:
 				return False
 			sourceRows = sorted(
-				int(pbItem.stringForType_("public.data"))
+				int(pbItem.stringForType_(_DRAG_TYPE))
 				for pbItem in pasteboardItems
-				if pbItem.stringForType_("public.data") is not None
+				if pbItem.stringForType_(_DRAG_TYPE) is not None
 			)
 			if not sourceRows:
 				return False
@@ -348,6 +351,25 @@ try:
 			return None
 except objc.error:
 	_SJRowDragDataSource = objc.lookUpClass("_SJRowDragDataSource")
+
+
+# ─── Table single-click handler ───────────────────────────────────────────────
+
+try:
+	class _SJTableClickHandler(NSObject):
+		"""Receives NSTableView single-click actions and dispatches to the juggler."""
+		_juggler = None
+
+		def tableClicked_(self, sender):
+			if self._juggler is None:
+				return
+			col = sender.clickedColumn()
+			row = sender.clickedRow()
+			if row < 0 or col < 0:
+				return
+			self._juggler._onCellClick(col, row)
+except objc.error:
+	_SJTableClickHandler = objc.lookUpClass("_SJTableClickHandler")
 
 
 # ─── Collect window ───────────────────────────────────────────────────────────
@@ -468,7 +490,6 @@ class ScriptJuggler:
 			[],
 			columnDescriptions=columnDescriptions,
 			showColumnTitles=False,
-			selectionCallback=self._listClicked,
 			doubleClickCallback=self._listDoubleClicked,
 			allowsMultipleSelection=True,
 			rowHeight=ROW_HEIGHT,
@@ -477,8 +498,12 @@ class ScriptJuggler:
 			drawHorizontalLines=False,
 		)
 
-		# Install tooltip delegate (chained)
 		tableView = self.w.scriptList.getNSTableView()
+
+		# Tighten horizontal gaps between columns
+		tableView.setIntercellSpacing_((2, 2))
+
+		# Install tooltip delegate (chained)
 		self._tooltipDelegate = _SJToolTipDelegate.alloc().init()
 		self._tooltipDelegate._juggler = self
 		self._tooltipDelegate._originalDelegate = tableView.delegate()
@@ -490,6 +515,13 @@ class ScriptJuggler:
 		self._dragDataSource._juggler = self
 		tableView.setDataSource_(self._dragDataSource)
 		tableView.setDraggingSourceOperationMask_forLocal_(NSDragOperationMove, True)
+		tableView.registerForDraggedTypes_([_DRAG_TYPE])
+
+		# Wire single-click action handler for play/done column clicks
+		self._tableClickHandler = _SJTableClickHandler.alloc().init()
+		self._tableClickHandler._juggler = self
+		tableView.setTarget_(self._tableClickHandler)
+		tableView.setAction_("tableClicked:")
 
 		# Centre-align the narrow symbol columns
 		for colIdx in (COL_DRAG, COL_DONE, COL_PLAY):
@@ -540,9 +572,25 @@ class ScriptJuggler:
 					tableView = _self.w.scriptList.getNSTableView()
 					if tableView.window() and tableView.window().firstResponder() == tableView:
 						chars = event.characters()
-						if chars in ("\x7f", "\x08"):		# Delete / Backspace
+						mods  = event.modifierFlags()
+						cmd   = bool(mods & NSEventModifierFlagCommand)
+						if chars in ("\x7f", "\x08"):			# Delete / Backspace
 							_self._deleteSelected()
-							return None						# consume event
+							return None
+						elif chars == " ":						# Space – toggle done
+							_self._toggleDoneSelected()
+							return None
+						elif chars in ("\r", "\x03"):			# Return / Enter – run
+							sel = _self.w.scriptList.getSelection()
+							if len(sel) == 1:
+								_self._runEntry(sel[0])
+							return None
+						elif cmd and event.keyCode() == 126:	# Cmd-Up – move up
+							_self._moveSelectedUp()
+							return None
+						elif cmd and event.keyCode() == 125:	# Cmd-Down – move down
+							_self._moveSelectedDown()
+							return None
 			except Exception:
 				pass
 			return event
@@ -585,21 +633,51 @@ class ScriptJuggler:
 
 	# ── list interaction ──────────────────────────────────────────────────────
 
-	def _listClicked(self, sender=None):
-		tableView = self.w.scriptList.getNSTableView()
-		col = tableView.clickedColumn()
-		row = tableView.clickedRow()
+	def _onCellClick(self, col, row):
+		"""Called by _SJTableClickHandler on every single click."""
 		if row < 0 or row >= len(self.entries):
 			return
 		if col == COL_PLAY:
 			self._runEntry(row)
 		elif col == COL_DONE:
-			entry = self.entries[row]
-			entry["done"] = not entry.get("done", False)
+			self.entries[row]["done"] = not self.entries[row].get("done", False)
 			selection = self.w.scriptList.getSelection()
 			self._refreshList()
 			self.w.scriptList.setSelection(selection)
 			self._markChanged()
+
+	def _toggleDoneSelected(self):
+		"""Space bar: flip done state for every selected entry."""
+		selection = self.w.scriptList.getSelection()
+		if not selection:
+			return
+		for i in selection:
+			self.entries[i]["done"] = not self.entries[i].get("done", False)
+		self._refreshList()
+		self.w.scriptList.setSelection(selection)
+		self._markChanged()
+
+	def _moveSelectedUp(self):
+		"""Cmd-Up: shift selected rows one position upward."""
+		selection = sorted(self.w.scriptList.getSelection())
+		if not selection or selection[0] == 0:
+			return
+		for i in selection:
+			self.entries[i - 1], self.entries[i] = self.entries[i], self.entries[i - 1]
+		self._refreshList()
+		self.w.scriptList.setSelection([i - 1 for i in selection])
+		self._markChanged()
+
+	def _moveSelectedDown(self):
+		"""Cmd-Down: shift selected rows one position downward."""
+		selection = sorted(self.w.scriptList.getSelection(), reverse=True)
+		if not selection or selection[0] == len(self.entries) - 1:
+			return
+		for i in selection:
+			self.entries[i + 1], self.entries[i] = self.entries[i], self.entries[i + 1]
+		self._refreshList()
+		self.w.scriptList.setSelection([i + 1 for i in selection])
+		self._markChanged()
 
 	def _listDoubleClicked(self, sender=None):
 		"""Double-clicking the title column also runs the script."""
