@@ -185,7 +185,7 @@ DONE_ON  = "✅"		# U+2705  green check-mark button emoji
 # ─── Callback-action helper ───────────────────────────────────────────────────
 
 try:
-	class _CallbackMenuItem(NSObject):
+	class _SJMenuItemHandler(NSObject):
 		"""Thin NSObject wrapper that invokes a Python callable from an NSMenuItem action."""
 		_callback = None
 
@@ -193,12 +193,12 @@ try:
 			if self._callback is not None:
 				self._callback()
 except objc.error:
-	_CallbackMenuItem = objc.lookUpClass("_CallbackMenuItem")
+	_SJMenuItemHandler = objc.lookUpClass("_SJMenuItemHandler")
 
 
 def makeNSMenuItem(title, callback, enabled=True):
 	"""Return an NSMenuItem that calls *callback* when selected."""
-	handler = _CallbackMenuItem.alloc().init()
+	handler = _SJMenuItemHandler.alloc().init()
 	handler._callback = callback
 	item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, "trigger:", "")
 	item.setTarget_(handler)
@@ -210,7 +210,7 @@ def makeNSMenuItem(title, callback, enabled=True):
 # ─── Window-close interceptor ─────────────────────────────────────────────────
 
 try:
-	class _CloseInterceptor(NSObject):
+	class _SJCloseInterceptor(NSObject):
 		"""
 		NSWindowDelegate proxy that intercepts windowShouldClose: so we can show
 		an 'unsaved changes' alert.  All other delegate messages are forwarded to
@@ -243,13 +243,13 @@ try:
 				return self._originalDelegate
 			return None
 except objc.error:
-	_CloseInterceptor = objc.lookUpClass("_CloseInterceptor")
+	_SJCloseInterceptor = objc.lookUpClass("_SJCloseInterceptor")
 
 
 # ─── Tooltip delegate ─────────────────────────────────────────────────────────
 
 try:
-	class _ToolTipDelegate(NSObject):
+	class _SJToolTipDelegate(NSObject):
 		"""
 		NSTableViewDelegate proxy that provides per-row tooltips for the title
 		column.  All other delegate messages are forwarded to the original delegate.
@@ -276,7 +276,7 @@ try:
 				return self._originalDelegate
 			return None
 except objc.error:
-	_ToolTipDelegate = objc.lookUpClass("_ToolTipDelegate")
+	_SJToolTipDelegate = objc.lookUpClass("_SJToolTipDelegate")
 
 
 # ─── Drag-to-reorder data source proxy ───────────────────────────────────────
@@ -285,7 +285,7 @@ _DRAG_TYPE = "com.mekkablue.ScriptJuggler.rowDrag"
 
 
 try:
-	class _RowDragDataSource(NSObject):
+	class _SJRowDragDataSource(NSObject):
 		"""
 		NSTableViewDataSource proxy that adds row drag-and-drop reorder support.
 		Handles only the three drag-specific methods; forwards every other selector
@@ -318,13 +318,13 @@ try:
 		# ── drag destination: accept ────────────────────────────────────────────
 
 		def tableView_acceptDrop_row_dropOperation_(self, tableView, info, row, operation):
-			items = info.draggingPasteboard().pasteboardItems()
-			if not items:
+			pasteboardItems = info.draggingPasteboard().pasteboardItems()
+			if not pasteboardItems:
 				return False
 			sourceRows = sorted(
-				int(item.stringForType_("public.data"))
-				for item in items
-				if item.stringForType_("public.data") is not None
+				int(pbItem.stringForType_("public.data"))
+				for pbItem in pasteboardItems
+				if pbItem.stringForType_("public.data") is not None
 			)
 			if not sourceRows:
 				return False
@@ -347,7 +347,7 @@ try:
 					return self._originalDataSource
 			return None
 except objc.error:
-	_RowDragDataSource = objc.lookUpClass("_RowDragDataSource")
+	_SJRowDragDataSource = objc.lookUpClass("_SJRowDragDataSource")
 
 
 # ─── Collect window ───────────────────────────────────────────────────────────
@@ -479,13 +479,13 @@ class ScriptJuggler:
 
 		# Install tooltip delegate (chained)
 		tableView = self.w.scriptList.getNSTableView()
-		self._tooltipDelegate = _ToolTipDelegate.alloc().init()
+		self._tooltipDelegate = _SJToolTipDelegate.alloc().init()
 		self._tooltipDelegate._juggler = self
 		self._tooltipDelegate._originalDelegate = tableView.delegate()
 		tableView.setDelegate_(self._tooltipDelegate)
 
 		# Install drag-reorder data source (chained)
-		self._dragDataSource = _RowDragDataSource.alloc().init()
+		self._dragDataSource = _SJRowDragDataSource.alloc().init()
 		self._dragDataSource._originalDataSource = tableView.dataSource()
 		self._dragDataSource._juggler = self
 		tableView.setDataSource_(self._dragDataSource)
@@ -526,7 +526,7 @@ class ScriptJuggler:
 
 		# ── window close interception ─────────────────────────────────────────
 		win = self.w._window
-		self._closeInterceptor = _CloseInterceptor.alloc().init()
+		self._closeInterceptor = _SJCloseInterceptor.alloc().init()
 		self._closeInterceptor._juggler = self
 		self._closeInterceptor._originalDelegate = win.delegate()
 		win.setDelegate_(self._closeInterceptor)
