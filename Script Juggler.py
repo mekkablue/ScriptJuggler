@@ -14,18 +14,14 @@ import objc
 import vanilla
 from AppKit import (
 	NSApplication,
-	NSButtonCell, NSButtonTypeToggle, NSButtonTypeMomentaryPushIn,
-	NSBezelStyleSmallSquare,
 	NSMenu, NSMenuItem,
 	NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn,
-	NSColor, NSBezierPath, NSFont, NSImage, NSMakeRect,
-	NSImageOnly,
 	NSSavePanel, NSOpenPanel, NSModalResponseOK,
 	NSEvent, NSKeyDownMask,
 	NSDragOperationMove,
 	NSTableViewDropAbove,
 	NSPasteboardItem,
-	NSRoundLineCapStyle,
+	NSTextAlignmentCenter,
 )
 from Foundation import (
 	NSObject,
@@ -182,64 +178,8 @@ def runScript(path):
 		Glyphs.showMacroWindow()
 
 
-def makeCircleImage(filled, size=18):
-	"""
-	Return an NSImage of a circle.
-	  filled=False → grey outline circle
-	  filled=True  → green filled circle with white checkmark
-	"""
-	image = NSImage.alloc().initWithSize_((size, size))
-	image.lockFocus()
-	try:
-		margin = 1.5
-		rect = NSMakeRect(margin, margin, size - margin * 2, size - margin * 2)
-		path = NSBezierPath.bezierPathWithOvalInRect_(rect)
-		if filled:
-			NSColor.systemGreenColor().setFill()
-			path.fill()
-			# White checkmark
-			check = NSBezierPath.bezierPath()
-			check.setLineWidth_(2.2)
-			check.setLineCapStyle_(NSRoundLineCapStyle)
-			check.moveToPoint_((size * 0.22, size * 0.50))
-			check.lineToPoint_((size * 0.42, size * 0.28))
-			check.lineToPoint_((size * 0.78, size * 0.68))
-			NSColor.whiteColor().setStroke()
-			check.stroke()
-		else:
-			NSColor.clearColor().setFill()
-			path.fill()
-			path.setLineWidth_(1.5)
-			NSColor.tertiaryLabelColor().setStroke()
-			path.stroke()
-	finally:
-		image.unlockFocus()
-	return image
-
-
-def makeDoneCell():
-	"""NSButtonCell that draws a grey/green toggle circle."""
-	offImage = makeCircleImage(False)
-	onImage = makeCircleImage(True)
-	cell = NSButtonCell.alloc().init()
-	cell.setButtonType_(NSButtonTypeToggle)
-	cell.setBordered_(False)
-	cell.setImagePosition_(NSImageOnly)
-	cell.setImage_(offImage)
-	cell.setAlternateImage_(onImage)
-	cell.setTitle_("")
-	cell.setAlternateTitle_("")
-	return cell
-
-
-def makePlayCell():
-	"""NSButtonCell for the ▶ play button."""
-	cell = NSButtonCell.alloc().init()
-	cell.setButtonType_(NSButtonTypeMomentaryPushIn)
-	cell.setBezelStyle_(NSBezelStyleSmallSquare)
-	cell.setTitle_("▶")
-	cell.setFont_(NSFont.systemFontOfSize_(11))
-	return cell
+DONE_OFF = "○"		# U+25CB  empty circle
+DONE_ON  = "✅"		# U+2705  green check-mark button emoji
 
 
 # ─── Callback-action helper ───────────────────────────────────────────────────
@@ -518,9 +458,9 @@ class ScriptJuggler:
 
 		columnDescriptions = [
 			{"title": "", "key": "drag",  "width": DRAG_COL_WIDTH,  "editable": False},
-			{"title": "", "key": "done",  "width": DONE_COL_WIDTH,  "cell": makeDoneCell()},
+			{"title": "", "key": "done",  "width": DONE_COL_WIDTH,  "editable": False},
 			{"title": "Script", "key": "title", "editable": False},
-			{"title": "", "key": "play",  "width": PLAY_COL_WIDTH,  "cell": makePlayCell(), "editable": False},
+			{"title": "", "key": "play",  "width": PLAY_COL_WIDTH,  "editable": False},
 		]
 
 		self.w.scriptList = vanilla.List(
@@ -550,6 +490,10 @@ class ScriptJuggler:
 		self._dragDataSource._juggler = self
 		tableView.setDataSource_(self._dragDataSource)
 		tableView.setDraggingSourceOperationMask_forLocal_(NSDragOperationMove, True)
+
+		# Centre-align the narrow symbol columns
+		for colIdx in (COL_DRAG, COL_DONE, COL_PLAY):
+			tableView.tableColumns()[colIdx].dataCell().setAlignment_(NSTextAlignmentCenter)
 
 		# ── bottom bar ────────────────────────────────────────────────────────
 		self.w.bottomLine = vanilla.HorizontalLine((0, -BOTTOM_BAR_HEIGHT, -0, 1))
@@ -650,7 +594,11 @@ class ScriptJuggler:
 		if col == COL_PLAY:
 			self._runEntry(row)
 		elif col == COL_DONE:
-			self._syncDoneFromList()
+			entry = self.entries[row]
+			entry["done"] = not entry.get("done", False)
+			selection = self.w.scriptList.getSelection()
+			self._refreshList()
+			self.w.scriptList.setSelection(selection)
 			self._markChanged()
 
 	def _listDoubleClicked(self, sender=None):
@@ -663,7 +611,6 @@ class ScriptJuggler:
 
 	def _moveRows(self, sourceRows, toRow):
 		"""Move one or more rows to a new position (called from _RowDragDataSource)."""
-		self._syncDoneFromList()
 		sourceRows = sorted(sourceRows)
 		if not sourceRows:
 			return
@@ -690,7 +637,7 @@ class ScriptJuggler:
 		return [
 			{
 				"drag":  "☰",
-				"done":  1 if entry.get("done", False) else 0,
+				"done":  DONE_ON if entry.get("done", False) else DONE_OFF,
 				"title": entry["title"],
 				"play":  "▶",
 				"_path": entry["path"],		# hidden – used for re-sync after drag
@@ -701,13 +648,6 @@ class ScriptJuggler:
 	def _refreshList(self):
 		self.w.scriptList.set(self._listItems())
 
-	def _syncDoneFromList(self):
-		"""Read done-toggle states back from the list into self.entries."""
-		listItems = self.w.scriptList.get()
-		for i, item in enumerate(listItems):
-			if i < len(self.entries):
-				self.entries[i]["done"] = bool(item.get("done", 0))
-
 	def _syncEntriesFromList(self):
 		"""Rebuild self.entries in the order currently shown in the list."""
 		listItems = self.w.scriptList.get()
@@ -717,7 +657,7 @@ class ScriptJuggler:
 			path = item.get("_path", "")
 			if path in byPath:
 				entry = copy.copy(byPath[path])
-				entry["done"] = bool(item.get("done", 0))
+				entry["done"] = item.get("done", DONE_OFF) == DONE_ON
 				newEntries.append(entry)
 		self.entries = newEntries
 
@@ -735,7 +675,6 @@ class ScriptJuggler:
 
 	def addScripts(self, scripts):
 		"""Insert scripts after the last selected row, or append at the end."""
-		self._syncDoneFromList()
 		selection = self.w.scriptList.getSelection()
 		insertAt = max(selection) + 1 if selection else len(self.entries)
 		existingPaths = {e["path"] for e in self.entries}
@@ -756,7 +695,6 @@ class ScriptJuggler:
 	# ── delete / undo ─────────────────────────────────────────────────────────
 
 	def _deleteSelected(self):
-		self._syncDoneFromList()
 		selection = sorted(self.w.scriptList.getSelection(), reverse=True)
 		if not selection:
 			return
