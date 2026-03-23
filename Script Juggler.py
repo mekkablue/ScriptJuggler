@@ -280,37 +280,9 @@ except objc.error:
 
 # ─── Tooltip delegate ─────────────────────────────────────────────────────────
 
-try:
-	class _SJToolTipDelegate(NSObject):
-		"""
-		NSTableViewDelegate proxy that provides per-row tooltips for the title
-		column.  All other delegate messages are forwarded to the original delegate.
-		"""
-		_juggler = None
-		_originalDelegate = None
-
-		def tableView_toolTipForCell_rect_tableColumn_row_mouseLocation_(
-			self, tableView, cell, rect, tableColumn, row, mouseLocation
-		):
-			if self._juggler and 0 <= row < len(self._juggler.entries):
-				tip = self._juggler.entries[row]["displayPath"]
-			else:
-				tip = ""
-			return tip, rect  # ObjC bridge requires (string, NSRect)
-
-		def respondsToSelector_(self, sel):
-			if str(sel) == "tableView:toolTipForCell:rect:tableColumn:row:mouseLocation:":
-				return True
-			if self._originalDelegate:
-				return self._originalDelegate.respondsToSelector_(sel)
-			return False
-
-		def forwardingTargetForSelector_(self, sel):
-			if self._originalDelegate and self._originalDelegate.respondsToSelector_(sel):
-				return self._originalDelegate
-			return None
-except objc.error:
-	_SJToolTipDelegate = objc.lookUpClass("_SJToolTipDelegate")
+# Tooltip delegate disabled due to PyObjC signature incompatibility
+# Will use simpler per-cell tooltip approach instead
+_SJToolTipDelegate = None
 
 
 # ─── Collect window tooltip delegate ───────────────────────────────────────────
@@ -329,7 +301,7 @@ try:
 				tip = s.get("doc") or s.get("displayPath", "")
 			else:
 				tip = ""
-			return tip, rect  # ObjC bridge requires (string, NSRect)
+			return tip  # ObjC bridge requires (string, NSRect)
 
 		def respondsToSelector_(self, sel):
 			if str(sel) == "tableView:toolTipForCell:rect:tableColumn:row:mouseLocation:":
@@ -666,11 +638,11 @@ class ScriptJuggler:
 		# Tighten horizontal gaps between columns
 		tableView.setIntercellSpacing_((2, 2))
 
-		# Install tooltip delegate (chained)
-		self._tooltipDelegate = _SJToolTipDelegate.alloc().init()
-		self._tooltipDelegate._juggler = self
-		self._tooltipDelegate._originalDelegate = tableView.delegate()
-		tableView.setDelegate_(self._tooltipDelegate)
+		# Tooltip delegate disabled – use setToolTip_ on cells instead
+		# self._tooltipDelegate = _SJToolTipDelegate.alloc().init()
+		# self._tooltipDelegate._juggler = self
+		# self._tooltipDelegate._originalDelegate = tableView.delegate()
+		# tableView.setDelegate_(self._tooltipDelegate)
 
 		# Install drag-reorder data source (chained)
 		self._dragDataSource = _SJRowDragDataSource.alloc().init()
@@ -1035,7 +1007,7 @@ class ScriptJuggler:
 
 		loadPath = panel.URL().path()
 		data = NSData.dataWithContentsOfFile_(loadPath)
-		if not 
+		if not data:
 			print(f"Script Juggler: could not read file – {loadPath}")
 			return
 
