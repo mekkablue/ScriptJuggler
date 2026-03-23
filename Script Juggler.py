@@ -236,7 +236,7 @@ try:
 				return True
 			if self._originalDelegate:
 				return self._originalDelegate.respondsToSelector_(sel)
-			return objc.super(_CloseInterceptor, self).respondsToSelector_(sel)
+			return False
 
 		def forwardingTargetForSelector_(self, sel):
 			if self._originalDelegate and self._originalDelegate.respondsToSelector_(sel):
@@ -269,7 +269,7 @@ try:
 				return True
 			if self._originalDelegate:
 				return self._originalDelegate.respondsToSelector_(sel)
-			return objc.super(_ToolTipDelegate, self).respondsToSelector_(sel)
+			return False
 
 		def forwardingTargetForSelector_(self, sel):
 			if self._originalDelegate and self._originalDelegate.respondsToSelector_(sel):
