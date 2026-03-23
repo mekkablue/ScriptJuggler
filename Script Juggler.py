@@ -10,6 +10,7 @@ import re
 import copy
 import fnmatch
 import traceback
+import objc
 import vanilla
 from AppKit import (
 	NSApplication,
@@ -21,6 +22,9 @@ from AppKit import (
 	NSImageOnly,
 	NSSavePanel, NSOpenPanel, NSModalResponseOK,
 	NSEvent, NSKeyDownMask,
+	NSDragOperationMove,
+	NSTableViewDropAbove,
+	NSPasteboardItem,
 	NSRoundLineCapStyle,
 )
 from Foundation import (
@@ -288,7 +292,7 @@ class _CloseInterceptor(NSObject):
 			return True
 		if self._originalDelegate:
 			return self._originalDelegate.respondsToSelector_(sel)
-		return super().respondsToSelector_(sel)
+		return objc.super(_CloseInterceptor, self).respondsToSelector_(sel)
 
 	def forwardingTargetForSelector_(self, sel):
 		if self._originalDelegate and self._originalDelegate.respondsToSelector_(sel):
@@ -318,11 +322,79 @@ class _ToolTipDelegate(NSObject):
 			return True
 		if self._originalDelegate:
 			return self._originalDelegate.respondsToSelector_(sel)
-		return super().respondsToSelector_(sel)
+		return objc.super(_ToolTipDelegate, self).respondsToSelector_(sel)
 
 	def forwardingTargetForSelector_(self, sel):
 		if self._originalDelegate and self._originalDelegate.respondsToSelector_(sel):
 			return self._originalDelegate
+		return None
+
+
+# ─── Drag-to-reorder data source proxy ───────────────────────────────────────
+
+_DRAG_TYPE = "com.mekkablue.ScriptJuggler.rowDrag"
+
+
+class _RowDragDataSource(NSObject):
+	"""
+	NSTableViewDataSource proxy that adds row drag-and-drop reorder support.
+	Handles only the three drag-specific methods; forwards every other selector
+	to the original vanilla data source via forwardingTargetForSelector_.
+	"""
+	_originalDataSource = None
+	_juggler = None
+
+	_ownSelectors = frozenset({
+		"tableView:pasteboardWriterForRow:",
+		"tableView:validateDrop:proposedRow:proposedDropOperation:",
+		"tableView:acceptDrop:row:dropOperation:",
+	})
+
+	# ── drag source: write each row index into its own pasteboard item ────────
+
+	def tableView_pasteboardWriterForRow_(self, tableView, row):
+		item = NSPasteboardItem.alloc().init()
+		item.setString_forType_(str(row), "public.data")
+		return item
+
+	# ── drag destination: validate ────────────────────────────────────────────
+
+	def tableView_validateDrop_proposedRow_proposedDropOperation_(
+		self, tableView, info, row, operation
+	):
+		tableView.setDropRow_dropOperation_(row, NSTableViewDropAbove)
+		return NSDragOperationMove
+
+	# ── drag destination: accept ──────────────────────────────────────────────
+
+	def tableView_acceptDrop_row_dropOperation_(self, tableView, info, row, operation):
+		items = info.draggingPasteboard().pasteboardItems()
+		if not items:
+			return False
+		sourceRows = sorted(
+			int(item.stringForType_("public.data"))
+			for item in items
+			if item.stringForType_("public.data") is not None
+		)
+		if not sourceRows:
+			return False
+		if self._juggler:
+			self._juggler._moveRows(sourceRows, row)
+		return True
+
+	# ── forwarding ────────────────────────────────────────────────────────────
+
+	def respondsToSelector_(self, sel):
+		if str(sel) in self._ownSelectors:
+			return True
+		if self._originalDataSource:
+			return self._originalDataSource.respondsToSelector_(sel)
+		return False
+
+	def forwardingTargetForSelector_(self, sel):
+		if str(sel) not in self._ownSelectors and self._originalDataSource:
+			if self._originalDataSource.respondsToSelector_(sel):
+				return self._originalDataSource
 		return None
 
 
@@ -444,10 +516,8 @@ class ScriptJuggler:
 			[],
 			columnDescriptions=columnDescriptions,
 			showColumnTitles=False,
-			enableMove=True,
 			selectionCallback=self._listClicked,
 			doubleClickCallback=self._listDoubleClicked,
-			moveCallback=self._listMoved,
 			allowsMultipleSelection=True,
 			rowHeight=ROW_HEIGHT,
 			autohidesScrollers=True,
@@ -461,6 +531,13 @@ class ScriptJuggler:
 		self._tooltipDelegate._juggler = self
 		self._tooltipDelegate._originalDelegate = tableView.delegate()
 		tableView.setDelegate_(self._tooltipDelegate)
+
+		# Install drag-reorder data source (chained)
+		self._dragDataSource = _RowDragDataSource.alloc().init()
+		self._dragDataSource._originalDataSource = tableView.dataSource()
+		self._dragDataSource._juggler = self
+		tableView.setDataSource_(self._dragDataSource)
+		tableView.setDraggingSourceOperationMask_forLocal_(NSDragOperationMove, True)
 
 		# ── bottom bar ────────────────────────────────────────────────────────
 		self.w.bottomLine = vanilla.HorizontalLine((0, -BOTTOM_BAR_HEIGHT, -0, 1))
@@ -572,9 +649,26 @@ class ScriptJuggler:
 		if row >= 0 and row < len(self.entries) and col == COL_TITLE:
 			self._runEntry(row)
 
-	def _listMoved(self, sender=None):
-		"""After drag-reorder: rebuild self.entries from the new list order."""
-		self._syncEntriesFromList()
+	def _moveRows(self, sourceRows, toRow):
+		"""Move one or more rows to a new position (called from _RowDragDataSource)."""
+		self._syncDoneFromList()
+		sourceRows = sorted(sourceRows)
+		if not sourceRows:
+			return
+		# No-op: single row dropped onto itself
+		if len(sourceRows) == 1 and sourceRows[0] in (toRow, toRow - 1):
+			return
+		movedEntries = [self.entries[i] for i in sourceRows]
+		# Number of source rows that sit before the drop point shifts the insert index
+		numBefore = sum(1 for r in sourceRows if r < toRow)
+		insertAt = toRow - numBefore
+		# Remove source rows (high-to-low to keep lower indices stable)
+		for i in reversed(sourceRows):
+			del self.entries[i]
+		# Re-insert in original relative order
+		for entry in reversed(movedEntries):
+			self.entries.insert(insertAt, entry)
+		self._refreshList()
 		self._markChanged()
 
 	# ── sync helpers ──────────────────────────────────────────────────────────
