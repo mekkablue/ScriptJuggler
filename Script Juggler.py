@@ -244,13 +244,16 @@ def makePlayCell():
 
 # ─── Callback-action helper ───────────────────────────────────────────────────
 
-class _CallbackMenuItem(NSObject):
-	"""Thin NSObject wrapper that invokes a Python callable from an NSMenuItem action."""
-	_callback = None
+try:
+	class _CallbackMenuItem(NSObject):
+		"""Thin NSObject wrapper that invokes a Python callable from an NSMenuItem action."""
+		_callback = None
 
-	def trigger_(self, sender):
-		if self._callback is not None:
-			self._callback()
+		def trigger_(self, sender):
+			if self._callback is not None:
+				self._callback()
+except objc.error:
+	_CallbackMenuItem = objc.lookUpClass("_CallbackMenuItem")
 
 
 def makeNSMenuItem(title, callback, enabled=True):
@@ -266,68 +269,74 @@ def makeNSMenuItem(title, callback, enabled=True):
 
 # ─── Window-close interceptor ─────────────────────────────────────────────────
 
-class _CloseInterceptor(NSObject):
-	"""
-	NSWindowDelegate proxy that intercepts windowShouldClose: so we can show
-	an 'unsaved changes' alert.  All other delegate messages are forwarded to
-	the original vanilla delegate via forwardingTargetForSelector_.
-	"""
-	_juggler = None
-	_originalDelegate = None
+try:
+	class _CloseInterceptor(NSObject):
+		"""
+		NSWindowDelegate proxy that intercepts windowShouldClose: so we can show
+		an 'unsaved changes' alert.  All other delegate messages are forwarded to
+		the original vanilla delegate via forwardingTargetForSelector_.
+		"""
+		_juggler = None
+		_originalDelegate = None
 
-	def windowShouldClose_(self, sender):
-		if self._juggler:
-			return self._juggler._confirmClose()
-		return True
-
-	def windowWillClose_(self, notification):
-		if self._juggler:
-			self._juggler._onWindowClose()
-		if self._originalDelegate and self._originalDelegate.respondsToSelector_("windowWillClose:"):
-			self._originalDelegate.windowWillClose_(notification)
-
-	def respondsToSelector_(self, sel):
-		selName = str(sel)
-		if selName in ("windowShouldClose:", "windowWillClose:"):
+		def windowShouldClose_(self, sender):
+			if self._juggler:
+				return self._juggler._confirmClose()
 			return True
-		if self._originalDelegate:
-			return self._originalDelegate.respondsToSelector_(sel)
-		return objc.super(_CloseInterceptor, self).respondsToSelector_(sel)
 
-	def forwardingTargetForSelector_(self, sel):
-		if self._originalDelegate and self._originalDelegate.respondsToSelector_(sel):
-			return self._originalDelegate
-		return None
+		def windowWillClose_(self, notification):
+			if self._juggler:
+				self._juggler._onWindowClose()
+			if self._originalDelegate and self._originalDelegate.respondsToSelector_("windowWillClose:"):
+				self._originalDelegate.windowWillClose_(notification)
+
+		def respondsToSelector_(self, sel):
+			selName = str(sel)
+			if selName in ("windowShouldClose:", "windowWillClose:"):
+				return True
+			if self._originalDelegate:
+				return self._originalDelegate.respondsToSelector_(sel)
+			return objc.super(_CloseInterceptor, self).respondsToSelector_(sel)
+
+		def forwardingTargetForSelector_(self, sel):
+			if self._originalDelegate and self._originalDelegate.respondsToSelector_(sel):
+				return self._originalDelegate
+			return None
+except objc.error:
+	_CloseInterceptor = objc.lookUpClass("_CloseInterceptor")
 
 
 # ─── Tooltip delegate ─────────────────────────────────────────────────────────
 
-class _ToolTipDelegate(NSObject):
-	"""
-	NSTableViewDelegate proxy that provides per-row tooltips for the title
-	column.  All other delegate messages are forwarded to the original delegate.
-	"""
-	_juggler = None
-	_originalDelegate = None
+try:
+	class _ToolTipDelegate(NSObject):
+		"""
+		NSTableViewDelegate proxy that provides per-row tooltips for the title
+		column.  All other delegate messages are forwarded to the original delegate.
+		"""
+		_juggler = None
+		_originalDelegate = None
 
-	def tableView_toolTipForCell_rect_tableColumn_row_mouseLocation_(
-		self, tableView, cell, rect, tableColumn, row, mouseLocation
-	):
-		if self._juggler and 0 <= row < len(self._juggler.entries):
-			return self._juggler.entries[row]["displayPath"]
-		return ""
+		def tableView_toolTipForCell_rect_tableColumn_row_mouseLocation_(
+			self, tableView, cell, rect, tableColumn, row, mouseLocation
+		):
+			if self._juggler and 0 <= row < len(self._juggler.entries):
+				return self._juggler.entries[row]["displayPath"]
+			return ""
 
-	def respondsToSelector_(self, sel):
-		if str(sel) == "tableView:toolTipForCell:rect:tableColumn:row:mouseLocation:":
-			return True
-		if self._originalDelegate:
-			return self._originalDelegate.respondsToSelector_(sel)
-		return objc.super(_ToolTipDelegate, self).respondsToSelector_(sel)
+		def respondsToSelector_(self, sel):
+			if str(sel) == "tableView:toolTipForCell:rect:tableColumn:row:mouseLocation:":
+				return True
+			if self._originalDelegate:
+				return self._originalDelegate.respondsToSelector_(sel)
+			return objc.super(_ToolTipDelegate, self).respondsToSelector_(sel)
 
-	def forwardingTargetForSelector_(self, sel):
-		if self._originalDelegate and self._originalDelegate.respondsToSelector_(sel):
-			return self._originalDelegate
-		return None
+		def forwardingTargetForSelector_(self, sel):
+			if self._originalDelegate and self._originalDelegate.respondsToSelector_(sel):
+				return self._originalDelegate
+			return None
+except objc.error:
+	_ToolTipDelegate = objc.lookUpClass("_ToolTipDelegate")
 
 
 # ─── Drag-to-reorder data source proxy ───────────────────────────────────────
@@ -335,67 +344,70 @@ class _ToolTipDelegate(NSObject):
 _DRAG_TYPE = "com.mekkablue.ScriptJuggler.rowDrag"
 
 
-class _RowDragDataSource(NSObject):
-	"""
-	NSTableViewDataSource proxy that adds row drag-and-drop reorder support.
-	Handles only the three drag-specific methods; forwards every other selector
-	to the original vanilla data source via forwardingTargetForSelector_.
-	"""
-	_originalDataSource = None
-	_juggler = None
+try:
+	class _RowDragDataSource(NSObject):
+		"""
+		NSTableViewDataSource proxy that adds row drag-and-drop reorder support.
+		Handles only the three drag-specific methods; forwards every other selector
+		to the original vanilla data source via forwardingTargetForSelector_.
+		"""
+		_originalDataSource = None
+		_juggler = None
 
-	_ownSelectors = frozenset({
-		"tableView:pasteboardWriterForRow:",
-		"tableView:validateDrop:proposedRow:proposedDropOperation:",
-		"tableView:acceptDrop:row:dropOperation:",
-	})
+		_ownSelectors = frozenset({
+			"tableView:pasteboardWriterForRow:",
+			"tableView:validateDrop:proposedRow:proposedDropOperation:",
+			"tableView:acceptDrop:row:dropOperation:",
+		})
 
-	# ── drag source: write each row index into its own pasteboard item ────────
+		# ── drag source: write each row index into its own pasteboard item ──────
 
-	def tableView_pasteboardWriterForRow_(self, tableView, row):
-		item = NSPasteboardItem.alloc().init()
-		item.setString_forType_(str(row), "public.data")
-		return item
+		def tableView_pasteboardWriterForRow_(self, tableView, row):
+			item = NSPasteboardItem.alloc().init()
+			item.setString_forType_(str(row), "public.data")
+			return item
 
-	# ── drag destination: validate ────────────────────────────────────────────
+		# ── drag destination: validate ──────────────────────────────────────────
 
-	def tableView_validateDrop_proposedRow_proposedDropOperation_(
-		self, tableView, info, row, operation
-	):
-		tableView.setDropRow_dropOperation_(row, NSTableViewDropAbove)
-		return NSDragOperationMove
+		def tableView_validateDrop_proposedRow_proposedDropOperation_(
+			self, tableView, info, row, operation
+		):
+			tableView.setDropRow_dropOperation_(row, NSTableViewDropAbove)
+			return NSDragOperationMove
 
-	# ── drag destination: accept ──────────────────────────────────────────────
+		# ── drag destination: accept ────────────────────────────────────────────
 
-	def tableView_acceptDrop_row_dropOperation_(self, tableView, info, row, operation):
-		items = info.draggingPasteboard().pasteboardItems()
-		if not items:
-			return False
-		sourceRows = sorted(
-			int(item.stringForType_("public.data"))
-			for item in items
-			if item.stringForType_("public.data") is not None
-		)
-		if not sourceRows:
-			return False
-		if self._juggler:
-			self._juggler._moveRows(sourceRows, row)
-		return True
-
-	# ── forwarding ────────────────────────────────────────────────────────────
-
-	def respondsToSelector_(self, sel):
-		if str(sel) in self._ownSelectors:
+		def tableView_acceptDrop_row_dropOperation_(self, tableView, info, row, operation):
+			items = info.draggingPasteboard().pasteboardItems()
+			if not items:
+				return False
+			sourceRows = sorted(
+				int(item.stringForType_("public.data"))
+				for item in items
+				if item.stringForType_("public.data") is not None
+			)
+			if not sourceRows:
+				return False
+			if self._juggler:
+				self._juggler._moveRows(sourceRows, row)
 			return True
-		if self._originalDataSource:
-			return self._originalDataSource.respondsToSelector_(sel)
-		return False
 
-	def forwardingTargetForSelector_(self, sel):
-		if str(sel) not in self._ownSelectors and self._originalDataSource:
-			if self._originalDataSource.respondsToSelector_(sel):
-				return self._originalDataSource
-		return None
+		# ── forwarding ──────────────────────────────────────────────────────────
+
+		def respondsToSelector_(self, sel):
+			if str(sel) in self._ownSelectors:
+				return True
+			if self._originalDataSource:
+				return self._originalDataSource.respondsToSelector_(sel)
+			return False
+
+		def forwardingTargetForSelector_(self, sel):
+			if str(sel) not in self._ownSelectors and self._originalDataSource:
+				if self._originalDataSource.respondsToSelector_(sel):
+					return self._originalDataSource
+			return None
+except objc.error:
+	_RowDragDataSource = objc.lookUpClass("_RowDragDataSource")
 
 
 # ─── Collect window ───────────────────────────────────────────────────────────
