@@ -22,6 +22,9 @@ from AppKit import (
 	NSTableViewDropAbove,
 	NSPasteboardItem,
 	NSTextAlignmentCenter,
+	NSBezierPath,
+	NSCell,
+	NSColor,
 )
 from Foundation import (
 	NSObject,
@@ -372,6 +375,70 @@ except objc.error:
 	_SJTableClickHandler = objc.lookUpClass("_SJTableClickHandler")
 
 
+# ─── Custom table cells (NSBezierPath rendering) ──────────────────────────────
+
+try:
+	class _SJDoneCell(NSCell):
+		"""Grey-stroked empty circle when not done; solid green circle when done."""
+
+		def drawWithFrame_inView_(self, frame, view):
+			cx = frame.origin.x + frame.size.width  * 0.5
+			cy = frame.origin.y + frame.size.height * 0.5
+			r  = min(frame.size.width, frame.size.height) * 0.24
+			path = NSBezierPath.bezierPathWithOvalInRect_(((cx - r, cy - r), (r * 2.0, r * 2.0)))
+			hi = self.isHighlighted()
+			if str(self.objectValue() or "") == DONE_ON:
+				(NSColor.whiteColor() if hi else
+				 NSColor.colorWithCalibratedRed_green_blue_alpha_(0.204, 0.780, 0.349, 1.0)).setFill()
+				path.fill()
+			else:
+				NSColor.colorWithCalibratedWhite_alpha_(0.85 if hi else 0.55, 1.0).setStroke()
+				path.setLineWidth_(1.5)
+				path.stroke()
+except objc.error:
+	_SJDoneCell = objc.lookUpClass("_SJDoneCell")
+
+
+try:
+	class _SJPlayCell(NSCell):
+		"""Right-pointing filled triangle (play button)."""
+
+		def drawWithFrame_inView_(self, frame, view):
+			cx = frame.origin.x + frame.size.width  * 0.5
+			cy = frame.origin.y + frame.size.height * 0.5
+			th = min(frame.size.width, frame.size.height) * 0.46	# vertical extent
+			tw = th * 0.84											# horizontal extent
+			path = NSBezierPath.bezierPath()
+			path.moveToPoint_((cx - tw * 0.45, cy - th * 0.5))
+			path.lineToPoint_((cx + tw * 0.55, cy))
+			path.lineToPoint_((cx - tw * 0.45, cy + th * 0.5))
+			path.closePath()
+			(NSColor.whiteColor() if self.isHighlighted() else
+			 NSColor.colorWithCalibratedWhite_alpha_(0.35, 1.0)).setFill()
+			path.fill()
+except objc.error:
+	_SJPlayCell = objc.lookUpClass("_SJPlayCell")
+
+
+try:
+	class _SJDragCell(NSCell):
+		"""Three short horizontal lines (drag-handle grip)."""
+
+		def drawWithFrame_inView_(self, frame, view):
+			cx = frame.origin.x + frame.size.width  * 0.5
+			cy = frame.origin.y + frame.size.height * 0.5
+			lw = frame.size.width * 0.60
+			NSColor.colorWithCalibratedWhite_alpha_(0.85 if self.isHighlighted() else 0.62, 1.0).setStroke()
+			for dy in (-3.5, 0.0, 3.5):
+				line = NSBezierPath.bezierPath()
+				line.setLineWidth_(1.5)
+				line.moveToPoint_((cx - lw * 0.5, cy + dy))
+				line.lineToPoint_((cx + lw * 0.5, cy + dy))
+				line.stroke()
+except objc.error:
+	_SJDragCell = objc.lookUpClass("_SJDragCell")
+
+
 # ─── Collect window ───────────────────────────────────────────────────────────
 
 class CollectWindow:
@@ -523,9 +590,10 @@ class ScriptJuggler:
 		tableView.setTarget_(self._tableClickHandler)
 		tableView.setAction_("tableClicked:")
 
-		# Centre-align the narrow symbol columns
-		for colIdx in (COL_DRAG, COL_DONE, COL_PLAY):
-			tableView.tableColumns()[colIdx].dataCell().setAlignment_(NSTextAlignmentCenter)
+		# Replace default text cells with custom drawn cells
+		tableView.tableColumns()[COL_DONE].setDataCell_(_SJDoneCell.alloc().init())
+		tableView.tableColumns()[COL_PLAY].setDataCell_(_SJPlayCell.alloc().init())
+		tableView.tableColumns()[COL_DRAG].setDataCell_(_SJDragCell.alloc().init())
 
 		# ── bottom bar ────────────────────────────────────────────────────────
 		self.w.bottomLine = vanilla.HorizontalLine((0, -BOTTOM_BAR_HEIGHT, -0, 1))
