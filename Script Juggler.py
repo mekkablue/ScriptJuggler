@@ -351,10 +351,17 @@ try:
 
 		_ownSelectors = frozenset({
 			"tableView:pasteboardWriterForRow:",
+			"tableView:canDragRowsWithIndexes:atPoint:",
 			"tableView:validateDrop:proposedRow:proposedDropOperation:",
 			"tableView:acceptDrop:row:dropOperation:",
 			"tableView:writeRowsWithIndexes:toPasteboard:",
 		})
+
+		# ── drag gate ────────────────────────────────────────────────────────────
+
+		def tableView_canDragRowsWithIndexes_atPoint_(self, tableView, rowIndexes, point):
+			print(f"[SJDragSource] canDragRowsWithIndexes called")
+			return True
 
 		# ── drag source (new API) ────────────────────────────────────────────────
 
@@ -436,7 +443,10 @@ try:
 		# ── forwarding ───────────────────────────────────────────────────────────
 
 		def respondsToSelector_(self, sel):
-			if str(sel) in self._ownSelectors:
+			selStr = str(sel)
+			if "Drag" in selStr or "Drop" in selStr or "drag" in selStr or "drop" in selStr or "pasteboard" in selStr.lower():
+				print(f"[SJDragSource] respondsToSelector: {selStr!r}")
+			if selStr in self._ownSelectors:
 				return True
 			if self._originalDataSource:
 				return self._originalDataSource.respondsToSelector_(sel)
