@@ -358,7 +358,7 @@ _DRAG_TYPE = "com.mekkablue.ScriptJuggler.rowDrag"
 # ─── Table single-click handler ───────────────────────────────────────────────
 
 try:
-	class _SJTableClickHandler(NSObject):
+	class _SJTableClickHandler_v5(NSObject):
 		"""Receives NSTableView single-click actions and dispatches to the juggler."""
 		_juggler = None
 
@@ -369,9 +369,13 @@ try:
 			row = sender.clickedRow()
 			if row < 0 or col < 0:
 				return
+			# Skip play if the mouse was dragged (drag-select just happened)
+			if col == COL_PLAY and self._juggler._numDrag.get('selDrag', False):
+				return
 			self._juggler._onCellClick(col, row)
 except objc.error:
-	_SJTableClickHandler = objc.lookUpClass("_SJTableClickHandler")
+	pass
+_SJTableClickHandler = objc.lookUpClass("_SJTableClickHandler_v5")
 
 
 # ─── Custom table cells (NSBezierPath rendering) ──────────────────────────────
@@ -615,7 +619,7 @@ class ScriptJuggler:
 		self._hasUnsaved = False
 		self._keyMonitor   = None
 		self._mouseMonitor = None
-		self._numDrag      = {'active': False, 'srcRow': -1, 'sourceRows': [], 'ghostImg': None, 'ghostSize': None}
+		self._numDrag      = {'active': False, 'srcRow': -1, 'sourceRows': [], 'ghostImg': None, 'ghostSize': None, 'selDrag': False, 'downPt': (0.0, 0.0)}
 		self._dropLine        = None
 		self._ghostPanel      = None
 		self._playedPaths     = set()   # paths run at least once this session
@@ -780,6 +784,8 @@ class ScriptJuggler:
 				nd = _self._numDrag
 
 				if et == 1:  # leftMouseDown
+					nd['selDrag'] = False
+					nd['downPt'] = (pt.x, pt.y)
 					col = tv.columnAtPoint_(pt)
 					row = tv.rowAtPoint_(pt)
 					if col == COL_NUM and row >= 0:
@@ -793,14 +799,19 @@ class ScriptJuggler:
 					else:
 						nd['active'] = False
 
-				elif et == 6 and nd['active']:  # leftMouseDragged
-					targetRow = _self._dropRow_(tv, pt)
-					_self._showDropLine_(tv, targetRow)
-					# Create ghost panel on first drag event; move on subsequent ones
-					if nd['ghostImg'] and not _self._ghostPanel:
-						_self._ghostPanel = _self._openGhost_(nd['ghostImg'], nd['ghostSize'])
-					_self._moveGhost_(nd['ghostSize'])
-					return None  # suppress vanilla drag start
+				elif et == 6:  # leftMouseDragged
+					if nd['active']:
+						targetRow = _self._dropRow_(tv, pt)
+						_self._showDropLine_(tv, targetRow)
+						# Create ghost panel on first drag event; move on subsequent ones
+						if nd['ghostImg'] and not _self._ghostPanel:
+							_self._ghostPanel = _self._openGhost_(nd['ghostImg'], nd['ghostSize'])
+						_self._moveGhost_(nd['ghostSize'])
+						return None  # suppress vanilla drag start
+					else:
+						dp = nd['downPt']
+						if abs(pt.x - dp[0]) > 4 or abs(pt.y - dp[1]) > 4:
+							nd['selDrag'] = True
 
 				elif et == 2 and nd['active']:  # leftMouseUp
 					# Tear down visuals
