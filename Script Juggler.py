@@ -372,16 +372,20 @@ except objc.error:
 # ─── Custom table cells (NSBezierPath rendering) ──────────────────────────────
 
 try:
-	class _SJDoneCell(NSCell):
-		"""Grey-stroked empty circle when not done; solid green circle when done."""
+	class _SJDoneCell_v5(NSCell):
+		"""Grey-stroked empty circle (not done) or solid green circle (done).
+		A small inner dot (grey / white@0.6) marks scripts played this session."""
 
 		def drawWithFrame_inView_(self, frame, view):
-			cx = frame.origin.x + frame.size.width  * 0.5
-			cy = frame.origin.y + frame.size.height * 0.5
-			r  = min(frame.size.width, frame.size.height) * 0.24
+			cx   = frame.origin.x + frame.size.width  * 0.5
+			cy   = frame.origin.y + frame.size.height * 0.5
+			r    = min(frame.size.width, frame.size.height) * 0.24
+			hi   = self.isHighlighted()
+			val  = str(self.objectValue() or "")
+			played = val.endswith("|P")
+			done   = val.startswith(DONE_ON)
 			path = NSBezierPath.bezierPathWithOvalInRect_(((cx - r, cy - r), (r * 2.0, r * 2.0)))
-			hi = self.isHighlighted()
-			if str(self.objectValue() or "") == DONE_ON:
+			if done:
 				(NSColor.whiteColor() if hi else
 				 NSColor.colorWithCalibratedRed_green_blue_alpha_(0.204, 0.780, 0.349, 1.0)).setFill()
 				path.fill()
@@ -389,8 +393,19 @@ try:
 				NSColor.colorWithCalibratedWhite_alpha_(0.85 if hi else 0.55, 1.0).setStroke()
 				path.setLineWidth_(1.5)
 				path.stroke()
+			if played:
+				ri   = r * 0.4  # inner radius = 2/5 of outer diameter
+				dot  = NSBezierPath.bezierPathWithOvalInRect_(((cx - ri, cy - ri), (ri * 2.0, ri * 2.0)))
+				if hi:
+					NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.55).setFill()
+				elif done:
+					NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.6).setFill()
+				else:
+					NSColor.colorWithCalibratedWhite_alpha_(0.55, 1.0).setFill()
+				dot.fill()
 except objc.error:
-	_SJDoneCell = objc.lookUpClass("_SJDoneCell")
+	pass
+_SJDoneCell = objc.lookUpClass("_SJDoneCell_v5")
 
 
 try:
@@ -579,8 +594,9 @@ class ScriptJuggler:
 		self._keyMonitor   = None
 		self._mouseMonitor = None
 		self._numDrag      = {'active': False, 'srcRow': -1, 'sourceRows': [], 'ghostImg': None, 'ghostSize': None}
-		self._dropLine     = None
-		self._ghostPanel   = None
+		self._dropLine      = None
+		self._ghostPanel    = None
+		self._playedPaths   = set()   # paths run at least once this session
 		self._collectWindow = None
 
 		# ── build window ──────────────────────────────────────────────────────
@@ -1004,7 +1020,7 @@ class ScriptJuggler:
 		return [
 			{
 				"drag":  str(idx + 1),
-				"done":  DONE_ON if entry.get("done", False) else DONE_OFF,
+				"done":  (DONE_ON if entry.get("done", False) else DONE_OFF) + ("|P" if entry["path"] in self._playedPaths else ""),
 				"title": entry["title"],
 				"play":  "▶",
 				"_path": entry["path"],		# hidden – used for re-sync after drag
@@ -1035,7 +1051,11 @@ class ScriptJuggler:
 		if 0 <= index < len(self.entries):
 			path = self.entries[index]["path"]
 			if os.path.isfile(path):
+				was_new = path not in self._playedPaths
+				self._playedPaths.add(path)
 				runScript(path)
+				if was_new:
+					self._refreshList()
 			else:
 				print(f"Script Juggler: file not found – {path}")
 
