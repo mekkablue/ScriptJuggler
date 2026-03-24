@@ -1053,6 +1053,7 @@ class ScriptJuggler:
 		for entry in reversed(movedEntries):
 			self.entries.insert(insertAt, entry)
 		self._refreshList()
+		self.w.scriptList.setSelection(list(range(insertAt, insertAt + len(movedEntries))))
 		self._markChanged()
 
 	# ── sync helpers ──────────────────────────────────────────────────────────
