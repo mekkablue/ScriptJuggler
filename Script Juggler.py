@@ -1,0 +1,1369 @@
+# MenuTitle: Script Juggler
+# -*- coding: utf-8 -*-
+from __future__ import division, print_function, unicode_literals
+__doc__ = """
+Manage a custom workflow of Glyphs scripts: collect, reorder, toggle done status, run.
+"""
+
+import os
+import re
+import sys
+import copy
+import fnmatch
+import traceback
+import ast
+import objc
+import vanilla
+from AppKit import (
+	NSApplication,
+	NSMenu, NSMenuItem,
+	NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn,
+	NSSavePanel, NSOpenPanel, NSModalResponseOK,
+	NSEvent, NSKeyDownMask, NSEventModifierFlagCommand, NSEventModifierFlagOption,
+	NSTextAlignmentCenter,
+	NSBezierPath,
+	NSCell,
+	NSColor,
+	NSString, NSFont, NSForegroundColorAttributeName,
+	NSFontAttributeName, NSParagraphStyleAttributeName,
+	NSMutableParagraphStyle, NSLeftTextAlignment, NSRightTextAlignment,
+	NSPasteboard, NSTableView,
+	NSView, NSImage, NSImageView, NSPanel,
+)
+from Foundation import (
+	NSObject,
+	NSPropertyListSerialization,
+	NSPropertyListXMLFormat_v1_0,
+	NSData, NSURL,
+)
+import GlyphsApp as _GlyphsAppModule
+from GlyphsApp import Glyphs
+
+
+# Bump _SJ_VER whenever the body of an ObjC proxy class changes.  PyObjC
+# registers class names globally per process; the version suffix forces a new
+# registration instead of reusing the stale cached class from the last run.
+_SJ_VER = 5
+
+# ─── Constants ────────────────────────────────────────────────────────────────
+
+SCRIPTS_FOLDER = os.path.expanduser("~/Library/Application Support/Glyphs 3/Scripts")
+PREF_KEY       = "com.mekkablue.ScriptJuggler.autosave"
+ROW_HEIGHT = 28
+BOTTOM_BAR_HEIGHT = 36
+DRAG_COL_WIDTH = 20
+DONE_COL_WIDTH = 22
+PLAY_COL_WIDTH = 44
+SCROLLBAR_WIDTH = 16
+INSET = 8
+MIN_TITLE_WIDTH = 80
+MIN_WINDOW_WIDTH = DRAG_COL_WIDTH + DONE_COL_WIDTH + MIN_TITLE_WIDTH + PLAY_COL_WIDTH + SCROLLBAR_WIDTH + 120
+MIN_WINDOW_HEIGHT = ROW_HEIGHT * 2 + ROW_HEIGHT // 2 + BOTTOM_BAR_HEIGHT + 22 + int(ROW_HEIGHT * 1.5)
+
+SELF_NAME = "Script Juggler"
+
+# Column index constants (must match columnDescriptions order)
+COL_NUM = 0
+COL_DONE = 1
+COL_TITLE = 2
+COL_PLAY = 3
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def getFontFolder():
+	"""Return the folder of the frontmost saved font, or None."""
+	for font in Glyphs.fonts:
+		if font.filepath:
+			return os.path.dirname(font.filepath)
+	return None
+
+
+def getMenuTitle(path):
+	"""Extract #MenuTitle (or # MenuTitle) from the first 3 lines. Returns None if absent."""
+	try:
+		with open(path, "r", encoding="utf-8", errors="replace") as f:
+			for i, line in enumerate(f):
+				if i >= 3:
+					break
+				m = re.match(r"#\s*MenuTitle:\s*(.+)", line)
+				if m:
+					return m.group(1).strip()
+	except Exception:
+		pass
+	return None
+
+
+def getScriptDoc(path):
+	"""Read __doc__ from a .py file without importing it.
+
+	Handles both conventions used in Glyphs scripts:
+	  1. Module docstring  (bare triple-quoted string as the first statement)
+	  2. __doc__ = "..."  (explicit assignment, the Glyphs script convention)
+	  3. __doc__: str = "..."  (annotated assignment)
+
+	SyntaxWarnings from scripts that contain invalid escape sequences (common in
+	Glyphs scripts, e.g. regex strings with \\{) are suppressed.
+	"""
+	import warnings
+	try:
+		with open(path, "r", encoding="utf-8", errors="replace") as f:
+			source = f.read()
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore", SyntaxWarning)
+			try:
+				tree = ast.parse(source)
+			except SyntaxError:
+				return ""
+		for node in ast.walk(tree):
+			if isinstance(node, ast.Assign):
+				for target in node.targets:
+					if isinstance(target, ast.Name) and target.id == "__doc__":
+						try:
+							return ast.literal_eval(node.value) or ""
+						except (ValueError, TypeError):
+							return ""
+			elif isinstance(node, ast.AnnAssign):
+				if isinstance(node.target, ast.Name) and node.target.id == "__doc__":
+					if node.value is not None:
+						try:
+							return ast.literal_eval(node.value) or ""
+						except (ValueError, TypeError):
+							return ""
+		return ast.get_docstring(tree) or ""
+	except Exception:
+		return ""
+
+
+def collectAllScripts():
+	"""
+	Walk the Glyphs Scripts folder and return a sorted list of dicts for every
+	.py file that declares a MenuTitle in its first 3 lines (excluding Script Juggler).
+
+	Each dict: {path, title, displayPath, subfolders, done, doc}
+	Sorted: alphabetically by subfolder chain, then by title within the same folder.
+	"""
+	results = []
+	if not os.path.isdir(SCRIPTS_FOLDER):
+		return results
+
+	for root, dirs, files in os.walk(SCRIPTS_FOLDER, followlinks=True):
+		dirs.sort()
+		for fname in sorted(files):
+			if not fname.endswith(".py"):
+				continue
+			path = os.path.join(root, fname)
+			title = getMenuTitle(path)
+			if title is None:
+				continue
+			if SELF_NAME in fname or SELF_NAME in title:
+				continue
+			relpath = os.path.relpath(path, SCRIPTS_FOLDER)
+			parts = relpath.replace("\\", "/").split("/")
+			subfolders = parts[:-1]
+			displayParts = subfolders + [title]
+			displayPath = " → ".join(displayParts)
+			results.append({
+				"path": path,
+				"title": title,
+				"displayPath": displayPath,
+				"subfolders": subfolders,
+				"done": False,
+				"doc": getScriptDoc(path),
+			})
+
+	results.sort(key=lambda x: ([s.lower() for s in x["subfolders"]], x["title"].lower()))
+	return results
+
+
+def parseSearchTerms(searchText):
+	"""
+	Parse a search string into a list of terms.
+	  - Quoted substrings become one literal term (quotes stripped).
+	  - Remaining words are individual terms.
+	  - Wildcards (* ?) are supported.
+	All terms are lowercased.
+	"""
+	terms = []
+	remaining = searchText.strip()
+	while remaining:
+		remaining = remaining.lstrip()
+		if not remaining:
+			break
+		if remaining.startswith('"'):
+			end = remaining.find('"', 1)
+			if end > 0:
+				terms.append(remaining[1:end].lower())
+				remaining = remaining[end + 1:]
+			else:
+				terms.append(remaining[1:].lower())
+				break
+		else:
+			space = remaining.find(" ")
+			if space > 0:
+				terms.append(remaining[:space].lower())
+				remaining = remaining[space:]
+			else:
+				terms.append(remaining.lower())
+				break
+	return [t for t in terms if t]
+
+
+def matchesSearchTerms(displayPath, terms):
+	"""Return True if displayPath (lowercased) matches every term."""
+	lower = displayPath.lower()
+	for term in terms:
+		if "*" in term or "?" in term:
+			if not fnmatch.fnmatch(lower, "*" + term + "*"):
+				return False
+		else:
+			if term not in lower:
+				return False
+	return True
+
+
+def runScript(path):
+	"""Execute a Glyphs Python script with the full GlyphsApp namespace available."""
+	script_dir = os.path.dirname(os.path.abspath(path))
+	added = script_dir not in sys.path
+	if added:
+		sys.path.insert(0, script_dir)
+	try:
+		with open(path, "r", encoding="utf-8", errors="replace") as f:
+			source = f.read()
+		namespace = {k: v for k, v in vars(_GlyphsAppModule).items() if not k.startswith("_")}
+		namespace["__file__"] = path
+		namespace["__name__"] = "__main__"
+		exec(compile(source, path, "exec"), namespace)  # noqa: S102
+	except Exception:
+		print(f"Script Juggler: error running {os.path.basename(path)}:\n{traceback.format_exc()}")
+		Glyphs.showMacroWindow()
+	finally:
+		if added and script_dir in sys.path:
+			sys.path.remove(script_dir)
+
+
+DONE_OFF = "○"		# U+25CB  empty circle
+DONE_ON  = "✅"		# U+2705  green check-mark button emoji
+
+
+# ─── Callback-action helper ───────────────────────────────────────────────────
+
+_sjMenuItemHandlers = []  # module-level GC root for NSMenuItem handlers
+
+try:
+	class _SJMenuItemHandler(NSObject):
+		"""Thin NSObject wrapper that invokes a Python callable from an NSMenuItem action."""
+		_callback = None
+
+		def trigger_(self, sender):
+			if self._callback is not None:
+				self._callback()
+except objc.error:
+	_SJMenuItemHandler = objc.lookUpClass("_SJMenuItemHandler")
+
+
+def makeNSMenuItem(title, callback, enabled=True):
+	"""Return an NSMenuItem that calls *callback* when selected."""
+	handler = _SJMenuItemHandler.alloc().init()
+	handler._callback = callback
+	_sjMenuItemHandlers.append(handler)  # prevent GC without setting attr on NSMenuItem
+	item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, "trigger:", "")
+	item.setTarget_(handler)
+	item.setEnabled_(enabled)
+	return item
+
+
+# ─── Window-close interceptor ─────────────────────────────────────────────────
+
+try:
+	class _SJCloseInterceptor(NSObject):
+		"""
+		NSWindowDelegate proxy that intercepts windowShouldClose: so we can show
+		an 'unsaved changes' alert.  All other delegate messages are forwarded to
+		the original vanilla delegate via forwardingTargetForSelector_.
+		"""
+		_juggler = None
+		_originalDelegate = None
+
+		def windowShouldClose_(self, sender):
+			if self._juggler:
+				return self._juggler._confirmClose()
+			return True
+
+		def windowWillClose_(self, notification):
+			if self._juggler:
+				self._juggler._onWindowClose()
+			if self._originalDelegate and self._originalDelegate.respondsToSelector_("windowWillClose:"):
+				self._originalDelegate.windowWillClose_(notification)
+
+		def respondsToSelector_(self, sel):
+			selName = str(sel)
+			if selName in ("windowShouldClose:", "windowWillClose:"):
+				return True
+			if self._originalDelegate:
+				return self._originalDelegate.respondsToSelector_(sel)
+			return False
+
+		def forwardingTargetForSelector_(self, sel):
+			if self._originalDelegate and self._originalDelegate.respondsToSelector_(sel):
+				return self._originalDelegate
+			return None
+except objc.error:
+	_SJCloseInterceptor = objc.lookUpClass("_SJCloseInterceptor")
+
+
+# ─── Tooltip proxy ────────────────────────────────────────────────────────────
+# Generic per-row tooltip delegate for cell-based NSTableViews.
+# Point _items at any list of dicts and set _key to the field to show.
+# tableView:toolTipForCell:rect:... has a pointer-out param (rect), so PyObjC
+# requires the return value to be (string, rect).
+
+_TOOLTIP_CLASS_NAME = f"_SJTooltipProxy_v{_SJ_VER}"
+try:
+	objc.lookUpClass(_TOOLTIP_CLASS_NAME)
+	_SJTooltipProxy = objc.lookUpClass(_TOOLTIP_CLASS_NAME)
+except objc.error:
+	class _SJTooltipProxy_v5(NSObject):  # class name must match _SJ_VER above
+		_items            = None   # list of dicts; reassign whenever the list changes
+		_key              = "displayPath"
+		_originalDelegate = None
+
+		def tableView_toolTipForCell_rect_tableColumn_row_mouseLocation_(
+			self, tableView, cell, rect, tableColumn, row, mouseLocation
+		):
+			colId = str(tableColumn.identifier())
+			if colId == "drag":
+				return ("Drag to reorder", rect)
+			if colId == "done":
+				return (f"{DONE_OFF} = not done   {DONE_ON} = done   \u2022 = played this session", rect)
+			text = ""
+			if self._items and 0 <= row < len(self._items):
+				text = (self._items[row].get(self._key, "") or "").strip()
+			return (text, rect)
+
+		def respondsToSelector_(self, sel):
+			if str(sel) == "tableView:toolTipForCell:rect:tableColumn:row:mouseLocation:":
+				return True
+			if self._originalDelegate:
+				return self._originalDelegate.respondsToSelector_(sel)
+			return False
+
+		def forwardingTargetForSelector_(self, sel):
+			if self._originalDelegate and self._originalDelegate.respondsToSelector_(sel):
+				return self._originalDelegate
+			return None
+
+	_SJTooltipProxy = _SJTooltipProxy_v5
+
+
+# ─── Drag-to-reorder data source proxy ───────────────────────────────────────
+
+_DRAG_TYPE = "com.mekkablue.ScriptJuggler.rowDrag"
+
+
+
+
+# ─── Table single-click handler ───────────────────────────────────────────────
+
+try:
+	class _SJTableClickHandler_v5(NSObject):
+		"""Receives NSTableView single-click actions and dispatches to the juggler."""
+		_juggler = None
+
+		def tableClicked_(self, sender):
+			if self._juggler is None:
+				return
+			col = sender.clickedColumn()
+			row = sender.clickedRow()
+			if row < 0 or col < 0:
+				return
+			# Skip play if mouse was dragged or mouseDown was on a different row
+			if col == COL_PLAY:
+				if self._juggler._numDrag.get('selDrag', False):
+					return
+				if self._juggler._numDrag.get('downOnPlay', -1) != row:
+					return
+			self._juggler._onCellClick(col, row)
+except objc.error:
+	pass
+_SJTableClickHandler = objc.lookUpClass("_SJTableClickHandler_v5")
+
+
+# ─── Custom table cells (NSBezierPath rendering) ──────────────────────────────
+
+try:
+	class _SJDoneCell_v5(NSCell):
+		"""Grey-stroked empty circle (not done) or solid green circle (done).
+		A small inner dot (grey / white@0.6) marks scripts played this session."""
+
+		def drawWithFrame_inView_(self, frame, view):
+			cx   = frame.origin.x + frame.size.width  * 0.5
+			cy   = frame.origin.y + frame.size.height * 0.5
+			r    = min(frame.size.width, frame.size.height) * 0.24
+			hi   = self.isHighlighted()
+			val  = str(self.objectValue() or "")
+			played = val.endswith("|P")
+			done   = val.startswith(DONE_ON)
+			path = NSBezierPath.bezierPathWithOvalInRect_(((cx - r, cy - r), (r * 2.0, r * 2.0)))
+			if done:
+				(NSColor.whiteColor() if hi else
+				 NSColor.colorWithCalibratedRed_green_blue_alpha_(0.204, 0.780, 0.349, 1.0)).setFill()
+				path.fill()
+			else:
+				NSColor.colorWithCalibratedWhite_alpha_(0.85 if hi else 0.55, 1.0).setStroke()
+				path.setLineWidth_(1.5)
+				path.stroke()
+			if played:
+				ri   = r * 0.4  # inner radius = 2/5 of outer diameter
+				dot  = NSBezierPath.bezierPathWithOvalInRect_(((cx - ri, cy - ri), (ri * 2.0, ri * 2.0)))
+				if hi:
+					NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.55).setFill()
+				elif done:
+					NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.6).setFill()
+				else:
+					NSColor.colorWithCalibratedWhite_alpha_(0.55, 1.0).setFill()
+				dot.fill()
+except objc.error:
+	pass
+_SJDoneCell = objc.lookUpClass("_SJDoneCell_v5")
+
+
+try:
+	class _SJPlayCell_v5(NSCell):
+		"""Right-pointing filled triangle (play button).
+		Size and opacity increase on hover; color matches title text (adaptive)."""
+
+		def drawWithFrame_inView_(self, frame, view):
+			cx = frame.origin.x + frame.size.width  * 0.5
+			cy = frame.origin.y + frame.size.height * 0.5
+			hi = self.isHighlighted()
+			# Detect hover by converting screen mouse position to view coords
+			hovered = False
+			if view.window():
+				try:
+					sp  = NSEvent.mouseLocation()
+					wr  = view.window().convertRectFromScreen_(((sp.x, sp.y), (0, 0)))
+					vp  = view.convertPoint_fromView_(wr.origin, None)
+					hovered = (frame.origin.x <= vp.x <= frame.origin.x + frame.size.width and
+					           frame.origin.y <= vp.y <= frame.origin.y + frame.size.height)
+				except Exception:
+					pass
+			scale = 0.58 if hovered else 0.46
+			th = min(frame.size.width, frame.size.height) * scale
+			tw = th * 0.84
+			path = NSBezierPath.bezierPath()
+			path.moveToPoint_((cx - tw * 0.45, cy - th * 0.5))
+			path.lineToPoint_((cx + tw * 0.55, cy))
+			path.lineToPoint_((cx - tw * 0.45, cy + th * 0.5))
+			path.closePath()
+			if hi:
+				NSColor.whiteColor().setFill()
+			else:
+				NSColor.labelColor().colorWithAlphaComponent_(1.0 if hovered else 0.40).setFill()
+			path.fill()
+except objc.error:
+	pass
+_SJPlayCell = objc.lookUpClass("_SJPlayCell_v5")
+
+
+try:
+	class _SJNumCell(NSCell):
+		"""Right-aligned monospaced row-position number, vertically centered."""
+
+		def drawWithFrame_inView_(self, frame, view):
+			val = self.objectValue()
+			text = str(val) if val is not None else ""
+			para = NSMutableParagraphStyle.alloc().init()
+			para.setAlignment_(NSRightTextAlignment)
+			hi = self.isHighlighted()
+			attrs = {
+				NSFontAttributeName: NSFont.monospacedDigitSystemFontOfSize_weight_(10, 0),
+				NSForegroundColorAttributeName: NSColor.colorWithCalibratedWhite_alpha_(1.0 if hi else 0.40, 1.0),
+				NSParagraphStyleAttributeName: para,
+			}
+			nsStr = NSString.stringWithString_(text)
+			textSize = nsStr.sizeWithAttributes_(attrs)
+			ty = frame.origin.y + (frame.size.height - textSize.height) * 0.5
+			drawRect = ((frame.origin.x, ty), (frame.size.width - 2, textSize.height))
+			nsStr.drawInRect_withAttributes_(drawRect, attrs)
+except objc.error:
+	_SJNumCell = objc.lookUpClass("_SJNumCell")
+
+
+try:
+	class _SJTitleCell_v5(NSCell):
+		"""Left-aligned title text, vertically centered in row."""
+
+		def drawWithFrame_inView_(self, frame, view):
+			val = self.objectValue() or ""
+			para = NSMutableParagraphStyle.alloc().init()
+			para.setAlignment_(NSLeftTextAlignment)
+			para.setLineBreakMode_(2)  # NSLineBreakByClipping – char-level, no ellipsis
+			hi = self.isHighlighted()
+			attrs = {
+				NSFontAttributeName: NSFont.systemFontOfSize_(13),
+				NSForegroundColorAttributeName: NSColor.whiteColor() if hi else NSColor.labelColor(),
+				NSParagraphStyleAttributeName: para,
+			}
+			nsStr = NSString.stringWithString_(str(val))
+			textSize = nsStr.sizeWithAttributes_(attrs)
+			ty = frame.origin.y + (frame.size.height - textSize.height) * 0.5
+			drawRect = ((frame.origin.x + 4, ty), (frame.size.width - 8, textSize.height))
+			nsStr.drawInRect_withAttributes_(drawRect, attrs)
+except objc.error:
+	pass
+_SJTitleCell = objc.lookUpClass("_SJTitleCell_v5")
+
+
+try:
+	class _SJDropLine(NSView):
+		"""Thin horizontal blue bar used as drag-reorder drop indicator."""
+		def drawRect_(self, rect):
+			NSColor.systemBlueColor().set()
+			NSBezierPath.fillRect_(self.bounds())
+except objc.error:
+	_SJDropLine = objc.lookUpClass("_SJDropLine")
+
+
+# ─── Collect window ───────────────────────────────────────────────────────────
+
+class CollectWindow:
+	"""Floating dialog for picking scripts to add to the juggler."""
+
+	def __init__(self, juggler):
+		self._juggler = juggler
+		self._allScripts = collectAllScripts()
+		self._filtered = list(self._allScripts)
+
+		windowWidth = 620
+		windowHeight = 520
+		self.w = vanilla.Window(
+			(windowWidth, windowHeight),
+			"Collect Scripts",
+			minSize=(400, 300),
+			maxSize=(1400, 1000),
+		)
+
+		inset = 10
+		self.w.searchLabel = vanilla.TextBox(
+			(inset, 13, 52, 18), "Search:", sizeStyle="small"
+		)
+		self.w.searchField = vanilla.EditText(
+			(inset + 56, 8, -inset, 24),
+			"",
+			callback=self._filterScripts,
+			continuous=True,
+		)
+		self.w.searchField.setToolTip(
+			"Space-separated search terms (AND). Use * and ? as wildcards. "
+			"Put \"quotes\" around a phrase for literal search."
+		)
+
+		self.w.scriptList = vanilla.List(
+			(inset, 40, -inset, -50),
+			[],
+			columnDescriptions=[{"title": "Script", "key": "displayPath"}],
+			showColumnTitles=False,
+			allowsMultipleSelection=True,
+			doubleClickCallback=self._collectSelected,
+			rowHeight=22,
+			autohidesScrollers=False,
+		)
+		# Per-row tooltip delegate: shows the script's __doc__ on hover
+		ctv = self.w.scriptList.getNSTableView()
+		self._tooltipDelegate = _SJTooltipProxy.alloc().init()
+		self._tooltipDelegate._items = self._filtered
+		self._tooltipDelegate._key   = "doc"
+		self._tooltipDelegate._originalDelegate = ctv.delegate()
+		ctv.setDelegate_(self._tooltipDelegate)
+		# Enable tooltips (required for the delegate method to fire)
+		ctv.setToolTip_("")
+
+		self.w.cancelButton = vanilla.Button(
+			(-inset - 180, -40, -inset - 90, -inset), "Cancel", callback=self._cancel
+		)
+		self.w.collectButton = vanilla.Button(
+			(-inset - 80, -40, -inset, -inset), "Collect", callback=self._collectSelected
+		)
+
+		self.w.setDefaultButton(self.w.collectButton)
+
+		self._updateList()
+		self.w.open()
+		self.w.makeKey()
+
+	# ── internal ──────────────────────────────────────────────────────────────
+
+	def _filterScripts(self, sender=None):
+		text = self.w.searchField.get().strip()
+		if not text:
+			self._filtered = list(self._allScripts)
+		else:
+			terms = parseSearchTerms(text)
+			self._filtered = [s for s in self._allScripts if matchesSearchTerms(s["displayPath"], terms)]
+		self._updateList()
+
+	def _updateList(self):
+		self._tooltipDelegate._items = self._filtered   # re-point after filter changes
+		self.w.scriptList.set([{"displayPath": s["displayPath"]} for s in self._filtered])
+
+	def _collectSelected(self, sender=None):
+		selection = self.w.scriptList.getSelection()
+		if not selection:
+			return
+		chosen = [self._filtered[i] for i in selection]
+		self._juggler.addScripts(chosen)
+		self.w.close()
+
+	def _cancel(self, sender=None):
+		self.w.close()
+
+
+# ─── Main window ──────────────────────────────────────────────────────────────
+
+class ScriptJuggler:
+	"""Main Script Juggler window."""
+
+	def __init__(self):
+		self.entries = []  # list of {path, title, displayPath, done, doc}
+		self._undoBuffer = None  # stores entries just before last delete
+		self._hasUnsaved = False
+		self._keyMonitor   = None
+		self._mouseMonitor = None
+		self._numDrag      = {'active': False, 'srcRow': -1, 'sourceRows': [], 'ghostImg': None, 'ghostSize': None, 'selDrag': False, 'downPt': (0.0, 0.0), 'downOnPlay': -1}
+		self._dropLine        = None
+		self._ghostPanel      = None
+		self._playedPaths     = set()   # paths run at least once this session
+		self._hoveredPlayRow  = -1
+		self._collectWindow   = None
+
+		# ── build window ──────────────────────────────────────────────────────
+		self.w = vanilla.Window(
+			(500, 400),
+			SELF_NAME,
+			minSize=(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT),
+			autosaveName="com.mekkablue.ScriptJuggler.mainwindow",
+		)
+
+		columnDescriptions = [
+			{"title": "", "key": "drag", "width": DRAG_COL_WIDTH, "editable": False},
+			{"title": "", "key": "done", "width": DONE_COL_WIDTH, "editable": False},
+			{"title": "Script", "key": "title", "editable": False},
+			{"title": "", "key": "play", "width": PLAY_COL_WIDTH, "editable": False},
+		]
+		self.w.scriptList = vanilla.List(
+			(0, 0, -0, -BOTTOM_BAR_HEIGHT),
+			[],
+			columnDescriptions=columnDescriptions,
+			showColumnTitles=False,
+			doubleClickCallback=self._listDoubleClicked,
+			allowsMultipleSelection=True,
+			rowHeight=ROW_HEIGHT,
+			autohidesScrollers=True,
+			drawVerticalLines=False,
+			drawHorizontalLines=False,
+			dragSettings=dict(type=_DRAG_TYPE, callback=lambda sender, indexes: [sender.get()[i] for i in indexes]),
+			selfApplicationDropSettings=dict(
+				type=_DRAG_TYPE,
+				allowDropBetweenRows=True,
+				allowDropOnRow=False,
+				callback=self._vanillaDrop,
+			),
+		)
+
+		tableView = self.w.scriptList.getNSTableView()
+
+		# Tighten horizontal gaps between columns
+		tableView.setIntercellSpacing_((2, 2))
+
+		# Per-row tooltip delegate showing displayPath on hover
+		self._tooltipDelegate = _SJTooltipProxy.alloc().init()
+		self._tooltipDelegate._items = self.entries
+		self._tooltipDelegate._key   = "displayPath"
+		self._tooltipDelegate._originalDelegate = tableView.delegate()
+		tableView.setDelegate_(self._tooltipDelegate)
+
+
+		# Wire single-click action handler for play/done column clicks
+		self._tableClickHandler = _SJTableClickHandler.alloc().init()
+		self._tableClickHandler._juggler = self
+		tableView.setTarget_(self._tableClickHandler)
+		tableView.setAction_("tableClicked:")
+
+		# Replace default text cells with custom drawn cells
+		tableView.tableColumns()[COL_NUM].setDataCell_(_SJNumCell.alloc().init())
+		tableView.tableColumns()[COL_DONE].setDataCell_(_SJDoneCell.alloc().init())
+		tableView.tableColumns()[COL_TITLE].setDataCell_(_SJTitleCell.alloc().init())
+		tableView.tableColumns()[COL_PLAY].setDataCell_(_SJPlayCell.alloc().init())
+
+		# Only the title column should stretch when the window is resized.
+		# NSTableColumnAutoresizingMask=1; NSTableViewUniformColumnAutoresizingStyle=1
+		for col in tableView.tableColumns():
+			col.setResizingMask_(0)
+		tableView.tableColumns()[COL_TITLE].setResizingMask_(1)
+		tableView.setColumnAutoresizingStyle_(1)
+		tableView.sizeToFit()
+
+		# Add drop indicator line (hidden until a COL_NUM drag is active)
+		self._dropLine = _SJDropLine.alloc().initWithFrame_(((0, -4), (100, 2)))
+		self._dropLine.setHidden_(True)
+		tableView.addSubview_(self._dropLine)
+
+		# ── bottom bar ────────────────────────────────────────────────────────
+		self.w.bottomLine = vanilla.HorizontalLine((0, -BOTTOM_BAR_HEIGHT, -0, 1))
+
+		btnY = -BOTTOM_BAR_HEIGHT + (BOTTOM_BAR_HEIGHT - 26) // 2
+
+		self.w.actionsButton = vanilla.Button(
+			(INSET, btnY, 30, 26),
+			"⋯",
+			callback=self._showActionsMenu,
+			sizeStyle="small",
+		)
+		self.w.actionsButton.setToolTip("Actions: Save Preset, Load Preset, Clear")
+
+		self.w.undoButton = vanilla.Button(
+			(INSET + 36, btnY, 30, 26),
+			"↺",
+			callback=self._undoDelete,
+			sizeStyle="small",
+		)
+		self.w.undoButton.setToolTip("Undo last deletion")
+		self.w.undoButton.show(False)
+
+		self.w.plusButton = vanilla.Button(
+			(-INSET - 30, btnY, 30, 26),
+			"+",
+			callback=self._openCollect,
+		)
+		self.w.plusButton.setToolTip("Add scripts (opens Collect dialog)")
+
+		# ── window close interception ─────────────────────────────────────────
+		win = self.w._window
+		self._closeInterceptor = _SJCloseInterceptor.alloc().init()
+		self._closeInterceptor._juggler = self
+		self._closeInterceptor._originalDelegate = win.delegate()
+		win.setDelegate_(self._closeInterceptor)
+
+		# ── keyboard: delete/backspace ────────────────────────────────────────
+		_self = self
+
+		def _keyHandler(event):
+			try:
+				if _self.w._window and _self.w._window.isKeyWindow():
+					tableView = _self.w.scriptList.getNSTableView()
+					if tableView.window() and tableView.window().firstResponder() == tableView:
+						chars = event.characters()
+						mods = event.modifierFlags()
+						cmd = bool(mods & NSEventModifierFlagCommand)
+						opt = bool(mods & NSEventModifierFlagOption)
+						if chars in ("\x7f", "\x08"):  # Delete / Backspace
+							_self._deleteSelected()
+							return None
+						elif chars == " ":  # Space – toggle done
+							_self._toggleDoneSelected()
+							return None
+						elif chars in ("\r", "\x03"):  # Return / Enter – run
+							sel = _self.w.scriptList.getSelection()
+							if len(sel) == 1:
+								_self._runEntry(sel[0])
+							return None
+						elif cmd and event.keyCode() == 126:  # Cmd-Up – move up (Cmd-Opt-Up: to top)
+							if opt:
+								_self._moveSelectedToTop()
+							else:
+								_self._moveSelectedUp()
+							return None
+						elif cmd and event.keyCode() == 125:  # Cmd-Down – move down (Cmd-Opt-Down: to bottom)
+							if opt:
+								_self._moveSelectedToBottom()
+							else:
+								_self._moveSelectedDown()
+							return None
+			except Exception:
+				pass
+			return event
+
+		self._keyMonitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+			NSKeyDownMask, _keyHandler
+		)
+
+		# ── mouse: number-column drag-to-reorder ──────────────────────────────
+		# Event type constants: leftMouseDown=1, leftMouseUp=2, leftMouseDragged=6
+		_NSMouseMask = (1 << 1) | (1 << 2) | (1 << 6) | (1 << 5)  # +mouseMoved for hover
+
+		def _mouseHandler(event):
+			try:
+				tv = _self.w.scriptList.getNSTableView()
+				if event.window() != tv.window():
+					return event
+				pt = tv.convertPoint_fromView_(event.locationInWindow(), None)
+				et = int(event.type())
+				nd = _self._numDrag
+
+				if et == 1:  # leftMouseDown
+					nd['selDrag'] = False
+					nd['downPt'] = (pt.x, pt.y)
+					col = tv.columnAtPoint_(pt)
+					row = tv.rowAtPoint_(pt)
+					nd['downOnPlay'] = row if col == COL_PLAY else -1
+					if col == COL_NUM and row >= 0:
+						selected         = sorted(tv.selectedRowIndexes())
+						nd['sourceRows'] = selected if row in selected else [row]
+						nd['srcRow']     = row
+						nd['active']     = True
+						# Capture ghost image now, before any drop indicator appears
+						nd['ghostImg'], nd['ghostSize'] = _self._captureGhost_(tv, nd['sourceRows'])
+						return None  # suppress: no selection change
+					else:
+						nd['active'] = False
+
+				elif et == 6:  # leftMouseDragged
+					if nd['active']:
+						targetRow = _self._dropRow_(tv, pt)
+						_self._showDropLine_(tv, targetRow)
+						# Create ghost panel on first drag event; move on subsequent ones
+						if nd['ghostImg'] and not _self._ghostPanel:
+							_self._ghostPanel = _self._openGhost_(nd['ghostImg'], nd['ghostSize'])
+						_self._moveGhost_(nd['ghostSize'])
+						return None  # suppress vanilla drag start
+					else:
+						dp = nd['downPt']
+						if abs(pt.x - dp[0]) > 4 or abs(pt.y - dp[1]) > 4:
+							nd['selDrag'] = True
+
+				elif et == 2 and nd['active']:  # leftMouseUp
+					# Tear down visuals
+					if _self._dropLine:
+						_self._dropLine.setHidden_(True)
+					_self._closeGhost_()
+					# Perform the reorder
+					targetRow  = _self._dropRow_(tv, pt)
+					sourceRows = nd.get('sourceRows') or [nd['srcRow']]
+					_self._moveRows(sourceRows, targetRow)
+					nd['active'] = False
+					return None  # suppress
+
+				elif et == 5:  # mouseMoved – update play-column hover
+					col = tv.columnAtPoint_(pt)
+					row = tv.rowAtPoint_(pt) if col == COL_PLAY else -1
+					if row != _self._hoveredPlayRow:
+						_self._hoveredPlayRow = row
+						tv.setNeedsDisplayInRect_(tv.rectOfColumn_(COL_PLAY))
+
+			except Exception:
+				import traceback; traceback.print_exc()
+			return event
+
+		self._mouseMonitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+			_NSMouseMask, _mouseHandler
+		)
+
+		self.w.open()
+		self.w.makeKey()
+		self.w._window.setAcceptsMouseMovedEvents_(True)
+		self._loadFromPrefs()
+
+	# ── unsaved / close ───────────────────────────────────────────────────────
+
+	def _markChanged(self):
+		self._hasUnsaved = True
+		self._saveToPrefs()
+
+	def _confirmClose(self):
+		"""Called by _CloseInterceptor.windowShouldClose_. Auto-saves; never blocks."""
+		self._saveToPrefs()
+		return True
+
+	def _saveToPrefs(self):
+		"""Persist current list to Glyphs script prefs (keyed by tab index)."""
+		try:
+			tabIndex = self._getTabIndex()
+			presetData = [
+				{
+					"path": e["path"],
+					"title": e["title"],
+					"displayPath": e["displayPath"],
+					"done": e.get("done", False),
+				}
+				for e in self.entries
+			]
+			existing = Glyphs.defaults[PREF_KEY]
+			all_tabs = dict(existing) if existing else {}
+			all_tabs[str(tabIndex)] = presetData
+			# Prune tabs beyond what is currently open
+			nOpenTabs = self._countOpenTabs()
+			for k in list(all_tabs.keys()):
+				if int(k) >= nOpenTabs:
+					del all_tabs[k]
+			Glyphs.defaults[PREF_KEY] = all_tabs
+		except Exception:
+			pass
+
+	def _loadFromPrefs(self):
+		"""Restore list from Glyphs script prefs for this tab index."""
+		try:
+			tabIndex = self._getTabIndex()
+			existing = Glyphs.defaults[PREF_KEY]
+			all_tabs = dict(existing) if existing else {}
+			presetData = all_tabs.get(str(tabIndex))
+			if not presetData:
+				# Fallback: try the single-slot key used by older versions
+				presetData = all_tabs.get("0")
+			if presetData:
+				self.entries = [
+					{
+						"path": str(item.get("path", "")),
+						"title": str(item.get("title", "")),
+						"displayPath": str(item.get("displayPath", "")),
+						"done": bool(item.get("done", False)),
+						"doc": "",
+					}
+					for item in presetData
+				]
+				self._refreshList()
+		except Exception:
+			pass
+
+	def _getTabIndex(self):
+		"""Return 0-based index of this juggler among all open Script Juggler windows."""
+		try:
+			wins = [w for w in NSApplication.sharedApplication().windows()
+			        if w.title() == SELF_NAME]
+			wins.sort(key=lambda w: w.windowNumber())
+			win = self.w._window
+			return wins.index(win) if win in wins else 0
+		except Exception:
+			return 0
+
+	def _countOpenTabs(self):
+		"""Number of Script Juggler windows currently open."""
+		try:
+			return len([w for w in NSApplication.sharedApplication().windows()
+			            if w.title() == SELF_NAME])
+		except Exception:
+			return 1
+
+	def _onWindowClose(self):
+		"""Cleanup called when the window actually closes."""
+		if self._keyMonitor:
+			NSEvent.removeMonitor_(self._keyMonitor)
+			self._keyMonitor = None
+		if self._mouseMonitor:
+			NSEvent.removeMonitor_(self._mouseMonitor)
+			self._mouseMonitor = None
+		self._closeGhost_()
+
+	# ── list interaction ──────────────────────────────────────────────────────
+
+	# ── drag-reorder helpers ──────────────────────────────────────────────────
+
+	def _dropRow_(self, tv, pt):
+		"""Return insertion index (0..n) for a drop at point pt (tableView coords)."""
+		n   = len(self.entries)
+		row = tv.rowAtPoint_(pt)
+		if row < 0:
+			return 0 if pt.y <= 0 else n
+		rect = tv.rectOfRow_(row)
+		return row + 1 if pt.y >= rect.origin.y + rect.size.height * 0.5 else row
+
+	def _showDropLine_(self, tv, targetRow):
+		"""Position and show the blue drop indicator at the targetRow boundary."""
+		line = self._dropLine
+		if not line:
+			return
+		n = len(self.entries)
+		if n == 0:
+			line.setHidden_(True)
+			return
+		if targetRow <= 0:
+			y = tv.rectOfRow_(0).origin.y
+		elif targetRow >= n:
+			r = tv.rectOfRow_(n - 1)
+			y = r.origin.y + r.size.height
+		else:
+			y = tv.rectOfRow_(targetRow).origin.y
+		line.setFrame_(((0, y - 1), (tv.bounds().size.width, 2)))
+		line.setHidden_(False)
+
+	def _captureGhost_(self, tv, sourceRows):
+		"""Return (NSImage, (w, h)) by rendering sourceRows as PDF from tableView."""
+		try:
+			rows = sorted(sourceRows)
+			top  = tv.rectOfRow_(rows[0])
+			bot  = tv.rectOfRow_(rows[-1])
+			rect = ((top.origin.x, top.origin.y),
+			        (top.size.width, bot.origin.y + bot.size.height - top.origin.y))
+			data = tv.dataWithPDFInsideRect_(rect)
+			if not data or not len(data):
+				return None, None
+			img  = NSImage.alloc().initWithData_(data)
+			return img, (rect[1][0], rect[1][1])
+		except Exception:
+			return None, None
+
+	def _openGhost_(self, img, size):
+		"""Create a borderless floating panel showing img at 70 % opacity."""
+		w, h = size
+		# NSWindowStyleMaskBorderless=0, NSBackingStoreBuffered=2
+		panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+			((0, 0), (w, h)), 0, 2, False
+		)
+		panel.setAlphaValue_(0.7)
+		panel.setIgnoresMouseEvents_(True)
+		panel.setOpaque_(False)
+		panel.setBackgroundColor_(NSColor.clearColor())
+		panel.setLevel_(3)  # NSFloatingWindowLevel
+		iv = NSImageView.alloc().initWithFrame_(((0, 0), (w, h)))
+		iv.setImage_(img)
+		panel.contentView().addSubview_(iv)
+		self._moveGhost_(size, panel=panel)
+		panel.orderFront_(None)
+		return panel
+
+	def _moveGhost_(self, size, panel=None):
+		"""Reposition ghost panel so its top-left is offset 10 px from cursor."""
+		p = panel or self._ghostPanel
+		if not p or not size:
+			return
+		w, h    = size
+		mouse   = NSEvent.mouseLocation()
+		p.setFrameOrigin_((mouse.x + 10, mouse.y - h - 2))
+
+	def _closeGhost_(self):
+		if self._ghostPanel:
+			self._ghostPanel.close()
+			self._ghostPanel = None
+
+	# ── list interaction ──────────────────────────────────────────────────────
+
+	def _onCellClick(self, col, row):
+		"""Called by _SJTableClickHandler on every single click."""
+		if row < 0 or row >= len(self.entries):
+			return
+		if col == COL_PLAY:
+			self._runEntry(row)
+		elif col == COL_DONE:
+			self.entries[row]["done"] = not self.entries[row].get("done", False)
+			selection = self.w.scriptList.getSelection()
+			self._refreshList()
+			self.w.scriptList.setSelection(selection)
+			self._markChanged()
+
+	def _toggleDoneSelected(self):
+		"""Space bar: flip done state for every selected entry."""
+		selection = self.w.scriptList.getSelection()
+		if not selection:
+			return
+		for i in selection:
+			self.entries[i]["done"] = not self.entries[i].get("done", False)
+		self._refreshList()
+		self.w.scriptList.setSelection(selection)
+		self._markChanged()
+
+	def _moveSelectedUp(self):
+		"""Cmd-Up: shift selected rows one position upward."""
+		selection = sorted(self.w.scriptList.getSelection())
+		if not selection or selection[0] == 0:
+			return
+		for i in selection:
+			self.entries[i - 1], self.entries[i] = self.entries[i], self.entries[i - 1]
+		self._refreshList()
+		self.w.scriptList.setSelection([i - 1 for i in selection])
+		self._markChanged()
+
+	def _moveSelectedDown(self):
+		"""Cmd-Down: shift selected rows one position downward."""
+		selection = sorted(self.w.scriptList.getSelection(), reverse=True)
+		if not selection or selection[0] == len(self.entries) - 1:
+			return
+		for i in selection:
+			self.entries[i + 1], self.entries[i] = self.entries[i], self.entries[i + 1]
+		self._refreshList()
+		self.w.scriptList.setSelection([i + 1 for i in selection])
+		self._markChanged()
+
+	def _moveSelectedToTop(self):
+		"""Cmd-Opt-Up: move selected rows to the very top."""
+		selection = sorted(self.w.scriptList.getSelection())
+		if not selection or selection[0] == 0:
+			return
+		moved = [self.entries[i] for i in selection]
+		remaining = [e for i, e in enumerate(self.entries) if i not in set(selection)]
+		self.entries[:] = moved + remaining
+		self._refreshList()
+		self.w.scriptList.setSelection(list(range(len(moved))))
+		self._markChanged()
+
+	def _moveSelectedToBottom(self):
+		"""Cmd-Opt-Down: move selected rows to the very bottom."""
+		selection = sorted(self.w.scriptList.getSelection())
+		if not selection or selection[-1] == len(self.entries) - 1:
+			return
+		moved = [self.entries[i] for i in selection]
+		remaining = [e for i, e in enumerate(self.entries) if i not in set(selection)]
+		self.entries[:] = remaining + moved
+		self._refreshList()
+		start = len(remaining)
+		self.w.scriptList.setSelection(list(range(start, start + len(moved))))
+		self._markChanged()
+
+	def _listDoubleClicked(self, sender=None):
+		"""Double-clicking the title column also runs the script."""
+		tableView = self.w.scriptList.getNSTableView()
+		col = tableView.clickedColumn()
+		row = tableView.clickedRow()
+		if row >= 0 and row < len(self.entries) and col == COL_TITLE:
+			self._runEntry(row)
+
+	def _vanillaDrop(self, sender, dropInfo):
+		"""Vanilla drag-and-drop callback: reorder rows via mouse drag."""
+		print(f"[drag] _vanillaDrop called; isProposal={dropInfo['isProposal']}  rowIndex={dropInfo['rowIndex']}  data={dropInfo['data']!r}")
+		if dropInfo["isProposal"]:
+			return True
+		draggedItems = dropInfo["data"]   # list of dragged list-item dicts
+		targetRow    = dropInfo["rowIndex"]
+		# Map dragged items back to current indices using the hidden _path key
+		allItems = sender.get()
+		pathToIdx = {item.get("_path", ""): i for i, item in enumerate(allItems)}
+		sourceRows = [pathToIdx[item["_path"]] for item in draggedItems
+		              if item.get("_path", "") in pathToIdx]
+		print(f"[drag] sourceRows={sourceRows}  targetRow={targetRow}")
+		if sourceRows:
+			self._moveRows(sourceRows, targetRow)
+		else:
+			print(f"[drag] no sourceRows resolved – draggedItems paths: {[i.get('_path') for i in draggedItems]}")
+			print(f"[drag] pathToIdx keys: {list(pathToIdx)[:5]} ...")
+		return True
+
+	def _moveRows(self, sourceRows, toRow):
+		"""Move one or more rows to a new position."""
+		sourceRows = sorted(sourceRows)
+		if not sourceRows:
+			return
+		# No-op: single row dropped onto itself
+		if len(sourceRows) == 1 and sourceRows[0] in (toRow, toRow - 1):
+			return
+		movedEntries = [self.entries[i] for i in sourceRows]
+		# Number of source rows that sit before the drop point shifts the insert index
+		numBefore = sum(1 for r in sourceRows if r < toRow)
+		insertAt = toRow - numBefore
+		# Remove source rows (high-to-low to keep lower indices stable)
+		for i in reversed(sourceRows):
+			del self.entries[i]
+		# Re-insert in original relative order
+		for entry in reversed(movedEntries):
+			self.entries.insert(insertAt, entry)
+		self._refreshList()
+		self.w.scriptList.setSelection(list(range(insertAt, insertAt + len(movedEntries))))
+		self._markChanged()
+
+	# ── sync helpers ──────────────────────────────────────────────────────────
+
+	def _listItems(self):
+		"""Build list items from self.entries."""
+		return [
+			{
+				"drag":  str(idx + 1),
+				"done":  (DONE_ON if entry.get("done", False) else DONE_OFF) + ("|P" if entry["path"] in self._playedPaths else ""),
+				"title": entry["title"],
+				"play":  "▶",
+				"_path": entry["path"],		# hidden – used for re-sync after drag
+			}
+			for idx, entry in enumerate(self.entries)
+		]
+
+	def _refreshList(self):
+		self._tooltipDelegate._items = self.entries   # re-point after any reassignment
+		self.w.scriptList.set(self._listItems())
+
+	def _syncEntriesFromList(self):
+		"""Rebuild self.entries in the order currently shown in the list."""
+		listItems = self.w.scriptList.get()
+		byPath = {e["path"]: e for e in self.entries}
+		newEntries = []
+		for item in listItems:
+			path = item.get("_path", "")
+			if path in byPath:
+				entry = copy.copy(byPath[path])
+				entry["done"] = item.get("done", DONE_OFF) == DONE_ON
+				newEntries.append(entry)
+		self.entries = newEntries
+
+	# ── run script ────────────────────────────────────────────────────────────
+
+	def _runEntry(self, index):
+		if 0 <= index < len(self.entries):
+			path = self.entries[index]["path"]
+			if os.path.isfile(path):
+				was_new = path not in self._playedPaths
+				self._playedPaths.add(path)
+				runScript(path)
+				if was_new:
+					self._refreshList()
+			else:
+				print(f"Script Juggler: file not found – {path}")
+
+	# ── add scripts (called from CollectWindow) ───────────────────────────────
+
+	def addScripts(self, scripts):
+		"""Insert scripts after the last selected row, or append at the end."""
+		selection = self.w.scriptList.getSelection()
+		insertAt = max(selection) + 1 if selection else len(self.entries)
+		existingPaths = {e["path"] for e in self.entries}
+		newEntries = [
+			{
+				"path": s["path"],
+				"title": s["title"],
+				"displayPath": s["displayPath"],
+				"done": False,
+				"doc": s.get("doc", ""),
+			}
+			for s in scripts
+			if s["path"] not in existingPaths
+		]
+		self.entries[insertAt:insertAt] = newEntries
+		self._refreshList()
+		self._markChanged()
+
+	# ── delete / undo ─────────────────────────────────────────────────────────
+
+	def _deleteSelected(self):
+		selection = sorted(self.w.scriptList.getSelection(), reverse=True)
+		if not selection:
+			return
+		self._undoBuffer = copy.deepcopy(self.entries)
+		for i in selection:
+			del self.entries[i]
+		self._refreshList()
+		self.w.undoButton.show(True)
+		self._markChanged()
+
+	def _undoDelete(self, sender=None):
+		if self._undoBuffer is not None:
+			self.entries = copy.deepcopy(self._undoBuffer)
+			self._undoBuffer = None
+			self._refreshList()
+			self.w.undoButton.show(False)
+			self._markChanged()
+
+	# ── open collect dialog ───────────────────────────────────────────────────
+
+	def _openCollect(self, sender=None):
+		self._collectWindow = CollectWindow(self)
+
+	# ── actions menu ──────────────────────────────────────────────────────────
+
+	def _showActionsMenu(self, sender=None):
+		menu = NSMenu.alloc().init()
+		menu.setAutoenablesItems_(False)
+		menu.addItem_(makeNSMenuItem("Save Preset", self._savePreset))
+		menu.addItem_(makeNSMenuItem("Load Preset", self._loadPreset))
+		menu.addItem_(NSMenuItem.separatorItem())
+		menu.addItem_(makeNSMenuItem("Clear List", self._clearEntries, enabled=bool(self.entries)))
+
+		nsButton = self.w.actionsButton._nsObject
+		currentEvent = NSApplication.sharedApplication().currentEvent()
+		if currentEvent:
+			NSMenu.popUpContextMenu_withEvent_forView_(menu, currentEvent, nsButton)
+		else:
+			# Fallback: pop up at bottom-left of button
+			from AppKit import NSPoint
+			pt = NSPoint(nsButton.frame().origin.x, nsButton.frame().origin.y)
+			menu.popUpMenuPositioningItem_atLocation_inView_(None, pt, nsButton.superview())
+
+	# ── preset: save ──────────────────────────────────────────────────────────
+
+	def _savePreset(self, sender=None):
+		panel = NSSavePanel.savePanel()
+		panel.setTitle_("Save Script Juggler Preset")
+		panel.setAllowedFileTypes_(["plist"])
+		panel.setCanCreateDirectories_(True)
+		fontFolder = getFontFolder()
+		if fontFolder:
+			panel.setDirectoryURL_(NSURL.fileURLWithPath_(fontFolder))
+
+		if panel.runModal() != NSModalResponseOK:
+			return
+
+		savePath = panel.URL().path()
+		if not savePath.endswith(".plist"):
+			savePath += ".plist"
+
+		presetData = [
+			{
+				"path": e["path"],
+				"title": e["title"],
+				"displayPath": e["displayPath"],
+				"done": e.get("done", False),
+			}
+			for e in self.entries
+		]
+
+		plistData, error = NSPropertyListSerialization.dataWithPropertyList_format_options_error_(
+			presetData, NSPropertyListXMLFormat_v1_0, 0, None
+		)
+
+		if plistData:
+			plistData.writeToFile_atomically_(savePath, True)
+			self._hasUnsaved = False
+		elif error:
+			print(f"Script Juggler: could not save preset – {error}")
+
+	# ── preset: load ──────────────────────────────────────────────────────────
+
+	def _loadPreset(self, sender=None):
+		panel = NSOpenPanel.openPanel()
+		panel.setTitle_("Load Script Juggler Preset")
+		panel.setAllowedFileTypes_(["plist"])
+		fontFolder = getFontFolder()
+		if fontFolder:
+			panel.setDirectoryURL_(NSURL.fileURLWithPath_(fontFolder))
+
+		if panel.runModal() != NSModalResponseOK:
+			return
+
+		loadPath = panel.URL().path()
+		data = NSData.dataWithContentsOfFile_(loadPath)
+		if not data:
+			print(f"Script Juggler: could not read file – {loadPath}")
+			return
+
+		presetData, _, error = NSPropertyListSerialization.propertyListWithData_options_format_error_(
+			data, 0, None, None
+		)
+
+		if error:
+			print(f"Script Juggler: could not parse preset – {error}")
+			return
+
+		if presetData:
+			self.entries = [
+				{
+					"path": str(item.get("path", "")),
+					"title": str(item.get("title", "")),
+					"displayPath": str(item.get("displayPath", "")),
+					"done": bool(item.get("done", False)),
+					"doc": "",  # reset doc on load
+				}
+				for item in presetData
+			]
+			self._refreshList()
+			self._hasUnsaved = False
+
+	# ── clear ─────────────────────────────────────────────────────────────────
+
+	def _clearEntries(self, sender=None):
+		if not self.entries:
+			return
+		self._undoBuffer = copy.deepcopy(self.entries)
+		self.entries = []
+		self._refreshList()
+		self.w.undoButton.show(True)
+		self._markChanged()
+
+
+# ─── Entry point ──────────────────────────────────────────────────────────────
+
+ScriptJuggler()
