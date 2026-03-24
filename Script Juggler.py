@@ -119,7 +119,7 @@ def collectAllScripts():
 	if not os.path.isdir(SCRIPTS_FOLDER):
 		return results
 
-	for root, dirs, files in os.walk(SCRIPTS_FOLDER):
+	for root, dirs, files in os.walk(SCRIPTS_FOLDER, followlinks=True):
 		dirs.sort()
 		for fname in sorted(files):
 			if not fname.endswith(".py"):
