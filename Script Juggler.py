@@ -48,6 +48,7 @@ _SJ_VER = 5
 # ─── Constants ────────────────────────────────────────────────────────────────
 
 SCRIPTS_FOLDER = os.path.expanduser("~/Library/Application Support/Glyphs 3/Scripts")
+PREF_KEY       = "com.mekkablue.ScriptJuggler.autosave"
 ROW_HEIGHT = 28
 BOTTOM_BAR_HEIGHT = 36
 DRAG_COL_WIDTH = 20
@@ -377,9 +378,12 @@ try:
 			row = sender.clickedRow()
 			if row < 0 or col < 0:
 				return
-			# Skip play if the mouse was dragged (drag-select just happened)
-			if col == COL_PLAY and self._juggler._numDrag.get('selDrag', False):
-				return
+			# Skip play if mouse was dragged or mouseDown was on a different row
+			if col == COL_PLAY:
+				if self._juggler._numDrag.get('selDrag', False):
+					return
+				if self._juggler._numDrag.get('downOnPlay', -1) != row:
+					return
 			self._juggler._onCellClick(col, row)
 except objc.error:
 	pass
@@ -627,7 +631,7 @@ class ScriptJuggler:
 		self._hasUnsaved = False
 		self._keyMonitor   = None
 		self._mouseMonitor = None
-		self._numDrag      = {'active': False, 'srcRow': -1, 'sourceRows': [], 'ghostImg': None, 'ghostSize': None, 'selDrag': False, 'downPt': (0.0, 0.0)}
+		self._numDrag      = {'active': False, 'srcRow': -1, 'sourceRows': [], 'ghostImg': None, 'ghostSize': None, 'selDrag': False, 'downPt': (0.0, 0.0), 'downOnPlay': -1}
 		self._dropLine        = None
 		self._ghostPanel      = None
 		self._playedPaths     = set()   # paths run at least once this session
@@ -803,6 +807,7 @@ class ScriptJuggler:
 					nd['downPt'] = (pt.x, pt.y)
 					col = tv.columnAtPoint_(pt)
 					row = tv.rowAtPoint_(pt)
+					nd['downOnPlay'] = row if col == COL_PLAY else -1
 					if col == COL_NUM and row >= 0:
 						selected         = sorted(tv.selectedRowIndexes())
 						nd['sourceRows'] = selected if row in selected else [row]
@@ -858,29 +863,85 @@ class ScriptJuggler:
 		self.w.open()
 		self.w.makeKey()
 		self.w._window.setAcceptsMouseMovedEvents_(True)
+		self._loadFromPrefs()
 
 	# ── unsaved / close ───────────────────────────────────────────────────────
 
 	def _markChanged(self):
 		self._hasUnsaved = True
+		self._saveToPrefs()
 
 	def _confirmClose(self):
-		"""Called by _CloseInterceptor.windowShouldClose_. Returns True to allow close."""
-		if not self._hasUnsaved or not self.entries:
-			return True
-		alert = NSAlert.alloc().init()
-		alert.setMessageText_("Save changes to Script Juggler?")
-		alert.setInformativeText_("Your script list has unsaved changes.")
-		alert.addButtonWithTitle_("Save")
-		alert.addButtonWithTitle_("Close without Saving")
-		alert.addButtonWithTitle_("Cancel")
-		response = alert.runModal()
-		if response == NSAlertFirstButtonReturn:
-			self._savePreset()
-			return True
-		elif response == NSAlertSecondButtonReturn:
-			return True
-		return False  # Cancel → block close
+		"""Called by _CloseInterceptor.windowShouldClose_. Auto-saves; never blocks."""
+		self._saveToPrefs()
+		return True
+
+	def _saveToPrefs(self):
+		"""Persist current list to Glyphs script prefs (keyed by tab index)."""
+		try:
+			tabIndex = self._getTabIndex()
+			presetData = [
+				{
+					"path": e["path"],
+					"title": e["title"],
+					"displayPath": e["displayPath"],
+					"done": e.get("done", False),
+				}
+				for e in self.entries
+			]
+			all_tabs = Glyphs.scriptAsDictionary().get(PREF_KEY) or {}
+			all_tabs[str(tabIndex)] = presetData
+			# Prune tabs beyond what is currently open
+			nOpenTabs = self._countOpenTabs()
+			for k in list(all_tabs.keys()):
+				if int(k) >= nOpenTabs:
+					del all_tabs[k]
+			Glyphs.scriptAsDictionary()[PREF_KEY] = all_tabs
+		except Exception:
+			pass
+
+	def _loadFromPrefs(self):
+		"""Restore list from Glyphs script prefs for this tab index."""
+		try:
+			tabIndex = self._getTabIndex()
+			all_tabs = Glyphs.scriptAsDictionary().get(PREF_KEY) or {}
+			presetData = all_tabs.get(str(tabIndex))
+			if not presetData:
+				# Fallback: try the single-slot key used by older versions
+				presetData = all_tabs.get("0")
+			if presetData:
+				self.entries = [
+					{
+						"path": str(item.get("path", "")),
+						"title": str(item.get("title", "")),
+						"displayPath": str(item.get("displayPath", "")),
+						"done": bool(item.get("done", False)),
+						"doc": "",
+					}
+					for item in presetData
+				]
+				self._refreshList()
+		except Exception:
+			pass
+
+	def _getTabIndex(self):
+		"""Return 0-based index of this juggler among all open Script Juggler windows."""
+		try:
+			wins = [w for w in NSApplication.sharedApplication().windows()
+			        if w.title() == SELF_NAME]
+			wins.sort(key=lambda w: w.windowNumber())
+			win = self.w._window
+			return wins.index(win) if win in wins else 0
+		except Exception:
+			return 0
+
+	def _countOpenTabs(self):
+		"""Number of Script Juggler windows currently open."""
+		try:
+			return len([w for w in NSApplication.sharedApplication().windows()
+			            if w.title() == SELF_NAME])
+		except Exception:
+			return 1
 
 	def _onWindowClose(self):
 		"""Cleanup called when the window actually closes."""
@@ -1198,7 +1259,7 @@ class ScriptJuggler:
 		menu.addItem_(makeNSMenuItem("Save Preset", self._savePreset))
 		menu.addItem_(makeNSMenuItem("Load Preset", self._loadPreset))
 		menu.addItem_(NSMenuItem.separatorItem())
-		menu.addItem_(makeNSMenuItem("Clear", self._clearEntries, enabled=bool(self.entries)))
+		menu.addItem_(makeNSMenuItem("Clear List", self._clearEntries, enabled=bool(self.entries)))
 
 		nsButton = self.w.actionsButton._nsObject
 		currentEvent = NSApplication.sharedApplication().currentEvent()
@@ -1294,17 +1355,11 @@ class ScriptJuggler:
 	def _clearEntries(self, sender=None):
 		if not self.entries:
 			return
-		alert = NSAlert.alloc().init()
-		alert.setMessageText_("Clear all entries?")
-		alert.setInformativeText_("This will remove all scripts from Script Juggler.")
-		alert.addButtonWithTitle_("Clear")
-		alert.addButtonWithTitle_("Cancel")
-		if alert.runModal() == NSAlertFirstButtonReturn:
-			self._undoBuffer = copy.deepcopy(self.entries)
-			self.entries = []
-			self._refreshList()
-			self.w.undoButton.show(True)
-			self._markChanged()
+		self._undoBuffer = copy.deepcopy(self.entries)
+		self.entries = []
+		self._refreshList()
+		self.w.undoButton.show(True)
+		self._markChanged()
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
