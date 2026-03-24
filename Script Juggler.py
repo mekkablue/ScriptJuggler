@@ -460,6 +460,66 @@ except objc.error:
 	_SJTitleCell = objc.lookUpClass("_SJTitleCell")
 
 
+# ─── Drag-reorder via number column ───────────────────────────────────────────
+# We subclass NSTableView and retrofit the existing vanilla instance with
+# object_setClass so mouseDown/Up on COL_NUM perform a direct reorder without
+# touching selection or vanilla's pasteboard-based drag machinery.
+
+_SJ_TV_CLASS = f"_SJTableView_v{_SJ_VER}"
+try:
+	_SJTableView = objc.lookUpClass(_SJ_TV_CLASS)
+except objc.error:
+	class _SJTableView_v4(NSTableView):  # name must match _SJ_TV_CLASS
+		_juggler    = None
+		_numDragRow = -1
+		_numDragOn  = False
+
+		def mouseDown_(self, event):
+			pt  = self.convertPoint_fromView_(event.locationInWindow(), None)
+			col = self.columnAtPoint_(pt)
+			row = self.rowAtPoint_(pt)
+			print(f"[drag] mouseDown col={col} row={row}")
+			if col == COL_NUM and row >= 0:
+				self._numDragOn  = True
+				self._numDragRow = row
+				# Don't call super: skip selection change and vanilla drag
+			else:
+				self._numDragOn  = False
+				self._numDragRow = -1
+				super().mouseDown_(event)
+
+		def mouseDragged_(self, event):
+			if self._numDragOn:
+				pt = self.convertPoint_fromView_(event.locationInWindow(), None)
+				print(f"[drag] mouseDragged numRow={self._numDragRow} pt=({pt.x:.0f},{pt.y:.0f})")
+			else:
+				super().mouseDragged_(event)
+
+		def mouseUp_(self, event):
+			if self._numDragOn and self._numDragRow >= 0 and self._juggler:
+				pt        = self.convertPoint_fromView_(event.locationInWindow(), None)
+				targetRow = self._dropRow_(pt)
+				srcRow    = self._numDragRow
+				selected  = sorted(self.selectedRowIndexes())
+				sourceRows = selected if srcRow in selected else [srcRow]
+				print(f"[drag] mouseUp sourceRows={sourceRows} targetRow={targetRow}")
+				self._juggler._moveRows(sourceRows, targetRow)
+			self._numDragOn  = False
+			self._numDragRow = -1
+			super().mouseUp_(event)
+
+		def _dropRow_(self, pt):
+			"""Return the insertion index (0..n) for a drop at point pt."""
+			n   = len(self._juggler.entries) if self._juggler else 0
+			row = self.rowAtPoint_(pt)
+			if row < 0:
+				return 0 if pt.y <= 0 else n
+			rect = self.rectOfRow_(row)
+			return row + 1 if pt.y >= rect.origin.y + rect.size.height * 0.5 else row
+
+	_SJTableView = _SJTableView_v4
+
+
 # ─── Collect window ───────────────────────────────────────────────────────────
 
 class CollectWindow:
@@ -632,6 +692,10 @@ class ScriptJuggler:
 		tableView.tableColumns()[COL_TITLE].setResizingMask_(1)
 		tableView.setColumnAutoresizingStyle_(1)
 		tableView.sizeToFit()
+
+		# Retrofit the vanilla NSTableView with our drag-reorder subclass
+		objc.object_setClass(tableView, _SJTableView)
+		tableView._juggler = self
 
 		# ── bottom bar ────────────────────────────────────────────────────────
 		self.w.bottomLine = vanilla.HorizontalLine((0, -BOTTOM_BAR_HEIGHT, -0, 1))
