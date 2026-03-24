@@ -414,24 +414,41 @@ _SJDoneCell = objc.lookUpClass("_SJDoneCell_v5")
 
 
 try:
-	class _SJPlayCell(NSCell):
-		"""Right-pointing filled triangle (play button)."""
+	class _SJPlayCell_v5(NSCell):
+		"""Right-pointing filled triangle (play button).
+		Size and opacity increase on hover; color matches title text (adaptive)."""
 
 		def drawWithFrame_inView_(self, frame, view):
 			cx = frame.origin.x + frame.size.width  * 0.5
 			cy = frame.origin.y + frame.size.height * 0.5
-			th = min(frame.size.width, frame.size.height) * 0.46	# vertical extent
-			tw = th * 0.84									# horizontal extent
+			hi = self.isHighlighted()
+			# Detect hover by converting screen mouse position to view coords
+			hovered = False
+			if view.window():
+				try:
+					sp  = NSEvent.mouseLocation()
+					wr  = view.window().convertRectFromScreen_(((sp.x, sp.y), (0, 0)))
+					vp  = view.convertPoint_fromView_(wr.origin, None)
+					hovered = (frame.origin.x <= vp.x <= frame.origin.x + frame.size.width and
+					           frame.origin.y <= vp.y <= frame.origin.y + frame.size.height)
+				except Exception:
+					pass
+			scale = 0.58 if hovered else 0.46
+			th = min(frame.size.width, frame.size.height) * scale
+			tw = th * 0.84
 			path = NSBezierPath.bezierPath()
 			path.moveToPoint_((cx - tw * 0.45, cy - th * 0.5))
 			path.lineToPoint_((cx + tw * 0.55, cy))
 			path.lineToPoint_((cx - tw * 0.45, cy + th * 0.5))
 			path.closePath()
-			(NSColor.whiteColor() if self.isHighlighted() else
-			 NSColor.colorWithCalibratedWhite_alpha_(0.35, 1.0)).setFill()
+			if hi:
+				NSColor.whiteColor().setFill()
+			else:
+				NSColor.labelColor().colorWithAlphaComponent_(1.0 if hovered else 0.40).setFill()
 			path.fill()
 except objc.error:
-	_SJPlayCell = objc.lookUpClass("_SJPlayCell")
+	pass
+_SJPlayCell = objc.lookUpClass("_SJPlayCell_v5")
 
 
 try:
@@ -599,10 +616,11 @@ class ScriptJuggler:
 		self._keyMonitor   = None
 		self._mouseMonitor = None
 		self._numDrag      = {'active': False, 'srcRow': -1, 'sourceRows': [], 'ghostImg': None, 'ghostSize': None}
-		self._dropLine      = None
-		self._ghostPanel    = None
-		self._playedPaths   = set()   # paths run at least once this session
-		self._collectWindow = None
+		self._dropLine        = None
+		self._ghostPanel      = None
+		self._playedPaths     = set()   # paths run at least once this session
+		self._hoveredPlayRow  = -1
+		self._collectWindow   = None
 
 		# ── build window ──────────────────────────────────────────────────────
 		self.w = vanilla.Window(
@@ -750,7 +768,7 @@ class ScriptJuggler:
 
 		# ── mouse: number-column drag-to-reorder ──────────────────────────────
 		# Event type constants: leftMouseDown=1, leftMouseUp=2, leftMouseDragged=6
-		_NSMouseMask = (1 << 1) | (1 << 2) | (1 << 6)
+		_NSMouseMask = (1 << 1) | (1 << 2) | (1 << 6) | (1 << 5)  # +mouseMoved for hover
 
 		def _mouseHandler(event):
 			try:
@@ -796,6 +814,13 @@ class ScriptJuggler:
 					nd['active'] = False
 					return None  # suppress
 
+				elif et == 5:  # mouseMoved – update play-column hover
+					col = tv.columnAtPoint_(pt)
+					row = tv.rowAtPoint_(pt) if col == COL_PLAY else -1
+					if row != _self._hoveredPlayRow:
+						_self._hoveredPlayRow = row
+						tv.setNeedsDisplayInRect_(tv.rectOfColumn_(COL_PLAY))
+
 			except Exception:
 				import traceback; traceback.print_exc()
 			return event
@@ -806,6 +831,7 @@ class ScriptJuggler:
 
 		self.w.open()
 		self.w.makeKey()
+		self.w._window.setAcceptsMouseMovedEvents_(True)
 
 	# ── unsaved / close ───────────────────────────────────────────────────────
 
