@@ -279,42 +279,28 @@ except objc.error:
 	_SJCloseInterceptor = objc.lookUpClass("_SJCloseInterceptor")
 
 
-# ─── Tooltip delegate ─────────────────────────────────────────────────────────
-
-# Tooltip delegate disabled due to PyObjC signature incompatibility
-# Will use simpler per-cell tooltip approach instead
-_SJToolTipDelegate = None
-
-
-# ─── Collect window tooltip delegate ───────────────────────────────────────────
+# ─── Tooltip proxy ────────────────────────────────────────────────────────────
+# Generic per-row tooltip delegate for cell-based NSTableViews.
+# Point _items at any list of dicts and set _key to the field to show.
+# tableView:toolTipForCell:rect:... has a pointer-out param (rect), so PyObjC
+# requires the return value to be (string, rect).
 
 try:
-	class _SJCollectTipDelegate(NSObject):
-		"""Provides per-row tooltips in CollectWindow showing script __doc__ via cell tooltips."""
-		_window = None
+	class _SJTooltipProxy(NSObject):
+		_items            = None   # list of dicts; reassign whenever the list changes
+		_key              = "displayPath"
 		_originalDelegate = None
 
-		def tableView_willDisplayCell_forTableColumn_row_(
-			self, tableView, cell, tableColumn, row
+		def tableView_toolTipForCell_rect_tableColumn_row_mouseLocation_(
+			self, tableView, cell, rect, tableColumn, row, mouseLocation
 		):
-			# Set the tooltip on the cell itself, using __doc__ if available
-			if self._window and 0 <= row < len(self._window._filtered):
-				s = self._window._filtered[row]
-				tip = s.get("doc") or s.get("displayPath", "")
-				try:
-					cell.setToolTip_(tip)
-				except Exception:
-					pass
-			# Forward to original delegate if it implements this method
-			if self._originalDelegate and self._originalDelegate.respondsToSelector_(
-				"tableView:willDisplayCell:forTableColumn:row:"
-			):
-				self._originalDelegate.tableView_willDisplayCell_forTableColumn_row_(
-					tableView, cell, tableColumn, row
-				)
+			text = ""
+			if self._items and 0 <= row < len(self._items):
+				text = self._items[row].get(self._key, "") or ""
+			return (text, rect)
 
 		def respondsToSelector_(self, sel):
-			if str(sel) == "tableView:willDisplayCell:forTableColumn:row:":
+			if str(sel) == "tableView:toolTipForCell:rect:tableColumn:row:mouseLocation:":
 				return True
 			if self._originalDelegate:
 				return self._originalDelegate.respondsToSelector_(sel)
@@ -325,7 +311,7 @@ try:
 				return self._originalDelegate
 			return None
 except objc.error:
-	_SJCollectTipDelegate = objc.lookUpClass("_SJCollectTipDelegate")
+	_SJTooltipProxy = objc.lookUpClass("_SJTooltipProxy")
 
 
 # ─── Drag-to-reorder data source proxy ───────────────────────────────────────
@@ -334,11 +320,14 @@ _DRAG_TYPE = "com.mekkablue.ScriptJuggler.rowDrag"
 
 
 try:
-	class _SJRowDragDataSource(NSObject):
+	class _SJDragSource(NSObject):
 		"""
-		NSTableViewDataSource proxy that adds row drag-and-drop reorder support.
-		Handles only the three drag-specific methods; forwards every other selector
-		to the original vanilla data source via forwardingTargetForSelector_.
+		NSTableViewDataSource proxy for row drag-and-drop reorder.
+		Uses setData_forType_ / dataForType_ which works with any custom UTI.
+		setString_forType_ requires a text-conforming UTI and silently fails for
+		custom types, leaving an empty pasteboard that rejects all drops.
+		Implements both the modern pasteboardWriterForRow: API and the older
+		writeRowsWithIndexes:toPasteboard: fallback.
 		"""
 		_originalDataSource = None
 		_juggler = None
@@ -349,40 +338,34 @@ try:
 			"tableView:acceptDrop:row:dropOperation:",
 			"tableView:writeRowsWithIndexes:toPasteboard:",
 		})
-		# ── drag source: write each row index into its own pasteboard item ──────
+
+		# ── drag source (new API) ────────────────────────────────────────────────
 
 		def tableView_pasteboardWriterForRow_(self, tableView, row):
+			encoded = str(row).encode("utf-8")
+			data = NSData.dataWithBytes_length_(encoded, len(encoded))
 			item = NSPasteboardItem.alloc().init()
-			item.setString_forType_(str(row), _DRAG_TYPE)
+			item.setData_forType_(data, _DRAG_TYPE)
 			return item
-		
+
+		# ── drag source (old API fallback) ───────────────────────────────────────
+
 		def tableView_writeRowsWithIndexes_toPasteboard_(self, tableView, indexSet, pboard):
-			"""
-			Old-style drag source API used by NSTableView.
-			Put the dragged row indexes onto the pasteboard under our custom type.
-			"""
-			# Collect all row indices from the NSIndexSet
 			rows = []
 			idx = indexSet.firstIndex()
 			while idx != NSNotFound:
 				rows.append(idx)
 				idx = indexSet.indexGreaterThanIndex_(idx)
-
 			if not rows:
 				return False
-
-			# Encode as a simple comma-separated string of row numbers
-			rowString = ",".join(str(i) for i in rows)
-
-			# Declare our custom type and write the data
+			encoded = (",".join(str(i) for i in rows)).encode("utf-8")
+			data = NSData.dataWithBytes_length_(encoded, len(encoded))
 			pboard.clearContents()
 			pboard.declareTypes_owner_([_DRAG_TYPE], None)
-			pboard.setString_forType_(rowString, _DRAG_TYPE)
-
+			pboard.setData_forType_(data, _DRAG_TYPE)
 			return True
-			
-			
-		# ── drag destination: validate ──────────────────────────────────────────
+
+		# ── drag destination: validate ───────────────────────────────────────────
 
 		def tableView_validateDrop_proposedRow_proposedDropOperation_(
 			self, tableView, info, row, operation
@@ -390,38 +373,36 @@ try:
 			tableView.setDropRow_dropOperation_(row, NSTableViewDropAbove)
 			return NSDragOperationMove
 
-		# ── drag destination: accept ────────────────────────────────────────────
+		# ── drag destination: accept ─────────────────────────────────────────────
 
 		def tableView_acceptDrop_row_dropOperation_(self, tableView, info, row, operation):
 			pboard = info.draggingPasteboard()
-			pasteboardItems = pboard.pasteboardItems()
 			sourceRows = []
-
-			# New API: items from pasteboardWriterForRow_
-			if pasteboardItems:
-				sourceRows = sorted(
-					int(pbItem.stringForType_(_DRAG_TYPE))
-					for pbItem in pasteboardItems
-					if pbItem.stringForType_(_DRAG_TYPE) is not None
-				)
-			else:
-				# Old API: single string with comma-separated indices
-				s = pboard.stringForType_(_DRAG_TYPE)
-				if s:
+			# New API: NSPasteboardItem list
+			for pbItem in (pboard.pasteboardItems() or []):
+				data = pbItem.dataForType_(_DRAG_TYPE)
+				if data:
 					try:
-						sourceRows = sorted(int(x) for x in s.split(",") if x.strip())
-					except ValueError:
-						sourceRows = []
-
+						for tok in bytes(data).decode("utf-8").split(","):
+							sourceRows.append(int(tok.strip()))
+					except (ValueError, UnicodeDecodeError):
+						pass
+			# Old API fallback: flat NSData on pasteboard
+			if not sourceRows:
+				data = pboard.dataForType_(_DRAG_TYPE)
+				if data:
+					try:
+						for tok in bytes(data).decode("utf-8").split(","):
+							sourceRows.append(int(tok.strip()))
+					except (ValueError, UnicodeDecodeError):
+						pass
 			if not sourceRows:
 				return False
-
 			if self._juggler:
-				self._juggler._moveRows(sourceRows, row)
-			
+				self._juggler._moveRows(sorted(sourceRows), row)
 			return True
-			
-		# ── forwarding ──────────────────────────────────────────────────────────
+
+		# ── forwarding ───────────────────────────────────────────────────────────
 
 		def respondsToSelector_(self, sel):
 			if str(sel) in self._ownSelectors:
@@ -436,7 +417,7 @@ try:
 					return self._originalDataSource
 			return None
 except objc.error:
-	_SJRowDragDataSource = objc.lookUpClass("_SJRowDragDataSource")
+	_SJDragSource = objc.lookUpClass("_SJDragSource")
 
 
 # ─── Table single-click handler ───────────────────────────────────────────────
@@ -594,16 +575,13 @@ class CollectWindow:
 			rowHeight=22,
 			autohidesScrollers=False,
 		)
-		# Remove generic view tooltip so per-row __doc__ tooltips can show
-		# self.w.scriptList.getNSTableView().setToolTip_(
-		# 	"Select scripts to add. Double-click or press Collect to add them."
-		# )
-		# Install tooltip delegate for collect window (shows __doc__)
-		self._collectTipDelegate = _SJCollectTipDelegate.alloc().init()
-		self._collectTipDelegate._window = self
+		# Per-row tooltip delegate: shows the script's __doc__ on hover
 		ctv = self.w.scriptList.getNSTableView()
-		self._collectTipDelegate._originalDelegate = ctv.delegate()
-		ctv.setDelegate_(self._collectTipDelegate)
+		self._tooltipDelegate = _SJTooltipProxy.alloc().init()
+		self._tooltipDelegate._items = self._filtered
+		self._tooltipDelegate._key   = "doc"
+		self._tooltipDelegate._originalDelegate = ctv.delegate()
+		ctv.setDelegate_(self._tooltipDelegate)
 
 		self.w.cancelButton = vanilla.Button(
 			(-inset - 180, -40, -inset - 90, -inset), "Cancel", callback=self._cancel
@@ -630,6 +608,7 @@ class CollectWindow:
 		self._updateList()
 
 	def _updateList(self):
+		self._tooltipDelegate._items = self._filtered   # re-point after filter changes
 		self.w.scriptList.set([{"displayPath": s["displayPath"]} for s in self._filtered])
 
 	def _collectSelected(self, sender=None):
@@ -688,14 +667,15 @@ class ScriptJuggler:
 		# Tighten horizontal gaps between columns
 		tableView.setIntercellSpacing_((2, 2))
 
-		# Tooltip delegate disabled – use setToolTip_ on cells instead
-		# self._tooltipDelegate = _SJToolTipDelegate.alloc().init()
-		# self._tooltipDelegate._juggler = self
-		# self._tooltipDelegate._originalDelegate = tableView.delegate()
-		# tableView.setDelegate_(self._tooltipDelegate)
+		# Per-row tooltip delegate showing displayPath on hover
+		self._tooltipDelegate = _SJTooltipProxy.alloc().init()
+		self._tooltipDelegate._items = self.entries
+		self._tooltipDelegate._key   = "displayPath"
+		self._tooltipDelegate._originalDelegate = tableView.delegate()
+		tableView.setDelegate_(self._tooltipDelegate)
 
 		# Install drag-reorder data source (chained)
-		self._dragDataSource = _SJRowDragDataSource.alloc().init()
+		self._dragDataSource = _SJDragSource.alloc().init()
 		self._dragDataSource._originalDataSource = tableView.dataSource()
 		self._dragDataSource._juggler = self
 		tableView.setDataSource_(self._dragDataSource)
@@ -911,6 +891,7 @@ class ScriptJuggler:
 		]
 
 	def _refreshList(self):
+		self._tooltipDelegate._items = self.entries   # re-point after any reassignment
 		self.w.scriptList.set(self._listItems())
 
 	def _syncEntriesFromList(self):
