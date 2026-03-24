@@ -42,7 +42,7 @@ from GlyphsApp import Glyphs
 # Bump _SJ_VER whenever the body of an ObjC proxy class changes.  PyObjC
 # registers class names globally per process; the version suffix forces a new
 # registration instead of reusing the stale cached class from the last run.
-_SJ_VER = 4
+_SJ_VER = 5
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -315,7 +315,7 @@ try:
 	objc.lookUpClass(_TOOLTIP_CLASS_NAME)
 	_SJTooltipProxy = objc.lookUpClass(_TOOLTIP_CLASS_NAME)
 except objc.error:
-	class _SJTooltipProxy_v4(NSObject):  # class name must match _SJ_VER above
+	class _SJTooltipProxy_v5(NSObject):  # class name must match _SJ_VER above
 		_items            = None   # list of dicts; reassign whenever the list changes
 		_key              = "displayPath"
 		_originalDelegate = None
@@ -323,6 +323,11 @@ except objc.error:
 		def tableView_toolTipForCell_rect_tableColumn_row_mouseLocation_(
 			self, tableView, cell, rect, tableColumn, row, mouseLocation
 		):
+			colId = str(tableColumn.identifier())
+			if colId == "drag":
+				return ("Drag to reorder", rect)
+			if colId == "done":
+				return (f"{DONE_OFF} = not done   {DONE_ON} = done   \u2022 = played this session", rect)
 			text = ""
 			if self._items and 0 <= row < len(self._items):
 				text = (self._items[row].get(self._key, "") or "").strip()
@@ -340,7 +345,7 @@ except objc.error:
 				return self._originalDelegate
 			return None
 
-	_SJTooltipProxy = _SJTooltipProxy_v4
+	_SJTooltipProxy = _SJTooltipProxy_v5
 
 
 # ─── Drag-to-reorder data source proxy ───────────────────────────────────────
