@@ -7,6 +7,7 @@ Manage a custom workflow of Glyphs scripts: collect, reorder, toggle done status
 
 import os
 import re
+import sys
 import copy
 import fnmatch
 import traceback
@@ -18,7 +19,7 @@ from AppKit import (
 	NSMenu, NSMenuItem,
 	NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn,
 	NSSavePanel, NSOpenPanel, NSModalResponseOK,
-	NSEvent, NSKeyDownMask, NSEventModifierFlagCommand,
+	NSEvent, NSKeyDownMask, NSEventModifierFlagCommand, NSEventModifierFlagOption,
 	NSTextAlignmentCenter,
 	NSBezierPath,
 	NSCell,
@@ -222,6 +223,10 @@ def matchesSearchTerms(displayPath, terms):
 
 def runScript(path):
 	"""Execute a Glyphs Python script with the full GlyphsApp namespace available."""
+	script_dir = os.path.dirname(os.path.abspath(path))
+	added = script_dir not in sys.path
+	if added:
+		sys.path.insert(0, script_dir)
 	try:
 		with open(path, "r", encoding="utf-8", errors="replace") as f:
 			source = f.read()
@@ -232,6 +237,9 @@ def runScript(path):
 	except Exception:
 		print(f"Script Juggler: error running {os.path.basename(path)}:\n{traceback.format_exc()}")
 		Glyphs.showMacroWindow()
+	finally:
+		if added and script_dir in sys.path:
+			sys.path.remove(script_dir)
 
 
 DONE_OFF = "○"		# U+25CB  empty circle
@@ -745,6 +753,7 @@ class ScriptJuggler:
 						chars = event.characters()
 						mods = event.modifierFlags()
 						cmd = bool(mods & NSEventModifierFlagCommand)
+						opt = bool(mods & NSEventModifierFlagOption)
 						if chars in ("\x7f", "\x08"):  # Delete / Backspace
 							_self._deleteSelected()
 							return None
@@ -756,11 +765,17 @@ class ScriptJuggler:
 							if len(sel) == 1:
 								_self._runEntry(sel[0])
 							return None
-						elif cmd and event.keyCode() == 126:  # Cmd-Up – move up
-							_self._moveSelectedUp()
+						elif cmd and event.keyCode() == 126:  # Cmd-Up – move up (Cmd-Opt-Up: to top)
+							if opt:
+								_self._moveSelectedToTop()
+							else:
+								_self._moveSelectedUp()
 							return None
-						elif cmd and event.keyCode() == 125:  # Cmd-Down – move down
-							_self._moveSelectedDown()
+						elif cmd and event.keyCode() == 125:  # Cmd-Down – move down (Cmd-Opt-Down: to bottom)
+							if opt:
+								_self._moveSelectedToBottom()
+							else:
+								_self._moveSelectedDown()
 							return None
 			except Exception:
 				pass
@@ -1004,6 +1019,31 @@ class ScriptJuggler:
 			self.entries[i + 1], self.entries[i] = self.entries[i], self.entries[i + 1]
 		self._refreshList()
 		self.w.scriptList.setSelection([i + 1 for i in selection])
+		self._markChanged()
+
+	def _moveSelectedToTop(self):
+		"""Cmd-Opt-Up: move selected rows to the very top."""
+		selection = sorted(self.w.scriptList.getSelection())
+		if not selection or selection[0] == 0:
+			return
+		moved = [self.entries[i] for i in selection]
+		remaining = [e for i, e in enumerate(self.entries) if i not in set(selection)]
+		self.entries[:] = moved + remaining
+		self._refreshList()
+		self.w.scriptList.setSelection(list(range(len(moved))))
+		self._markChanged()
+
+	def _moveSelectedToBottom(self):
+		"""Cmd-Opt-Down: move selected rows to the very bottom."""
+		selection = sorted(self.w.scriptList.getSelection())
+		if not selection or selection[-1] == len(self.entries) - 1:
+			return
+		moved = [self.entries[i] for i in selection]
+		remaining = [e for i, e in enumerate(self.entries) if i not in set(selection)]
+		self.entries[:] = remaining + moved
+		self._refreshList()
+		start = len(remaining)
+		self.w.scriptList.setSelection(list(range(start, start + len(moved))))
 		self._markChanged()
 
 	def _listDoubleClicked(self, sender=None):
