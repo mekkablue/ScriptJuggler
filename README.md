@@ -19,15 +19,15 @@ Run **Script Juggler** from the Glyphs Script menu. The window is non-modal and 
 ## The main window
 
 ```
-┌──────────────────────────────────────────────────┐
-│  #  ●  Script Name                           ▶   │
-│  1  ○  Check Glyph Names                     ▶   │
-│  2  ●  Decompose Compounds                   ▶   │
-│  3  ○  Remove Overlap                        ▶   │
-│  4  ○· Rename Glyphs                         ▶   │
-├──────────────────────────────────────────────────┤
-│  ⋯  ↺                                        +   │
-└──────────────────────────────────────────────────┘
+┌────────────────────────────────────┐
+│  #  ●  Script Name              ▶  │
+│  1  ○  Check Glyph Names        ▶  │
+│  2  ●  Decompose Compounds      ▶  │
+│  3  ○  Remove Overlap           ▶  │
+│  4  ○  Rename Glyphs            ▶  │
+├────────────────────────────────────┤
+│  …  ↺                           +  │
+└────────────────────────────────────┘
 ```
 
 Each row has four columns:
@@ -47,10 +47,9 @@ The ring in the second column communicates two independent states at a glance:
 
 | Appearance | Meaning |
 |------------|---------|
-| `○` — empty grey circle | Not done; not yet run this session |
-| `◎` — empty circle with a grey dot inside | Not done; **has been run** at least once this session |
-| `●` — solid green circle | Marked as **done** |
-| `⬤·` — solid green circle with a white dot | Marked as done; **also run** this session |
+| 🔘 — empty grey circle | Marked as **not done** |
+| 🟢 — solid green circle | Marked as **done** |
+| extra dot inside the circle | **has been run** at least once this session |
 
 "Done" is a manual flag you set to track your progress through the workflow. "Played" is set automatically when a script has been executed—it resets each time you close and reopen the window.
 
@@ -74,7 +73,7 @@ After a script runs, its ring gains an inner dot to show it was played this sess
 
 There are two ways to toggle the "done" flag:
 
-- **Click the ring** (○ / ●) to toggle that single row.
+- **Click the ring** (○/●) to toggle that single row.
 - **Press Space** to toggle all currently selected rows at once.
 
 Done status is saved automatically and restored when you reopen the window.
@@ -87,8 +86,9 @@ When the script list has keyboard focus (click any row to give it focus):
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` | Move selection up / down one row |
-| `Shift ↑` / `Shift ↓` | Extend selection up / down |
+| `↑` / `↓` | Select previous/next script |
+| `Shift ↑` / `Shift ↓` | Extend selection up/down |
+| `Opt ↑` / `Opt ↓` | Select first/last script |
 | `Cmd ↑` | Move selected row(s) **one position up** |
 | `Cmd ↓` | Move selected row(s) **one position down** |
 | `Cmd Opt ↑` | Move selected row(s) to the **very top** |
