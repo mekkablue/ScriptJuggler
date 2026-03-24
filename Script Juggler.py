@@ -889,14 +889,15 @@ class ScriptJuggler:
 				}
 				for e in self.entries
 			]
-			all_tabs = Glyphs.scriptAsDictionary().get(PREF_KEY) or {}
+			existing = Glyphs.defaults[PREF_KEY]
+			all_tabs = dict(existing) if existing else {}
 			all_tabs[str(tabIndex)] = presetData
 			# Prune tabs beyond what is currently open
 			nOpenTabs = self._countOpenTabs()
 			for k in list(all_tabs.keys()):
 				if int(k) >= nOpenTabs:
 					del all_tabs[k]
-			Glyphs.scriptAsDictionary()[PREF_KEY] = all_tabs
+			Glyphs.defaults[PREF_KEY] = all_tabs
 		except Exception:
 			pass
 
@@ -904,7 +905,8 @@ class ScriptJuggler:
 		"""Restore list from Glyphs script prefs for this tab index."""
 		try:
 			tabIndex = self._getTabIndex()
-			all_tabs = Glyphs.scriptAsDictionary().get(PREF_KEY) or {}
+			existing = Glyphs.defaults[PREF_KEY]
+			all_tabs = dict(existing) if existing else {}
 			presetData = all_tabs.get(str(tabIndex))
 			if not presetData:
 				# Fallback: try the single-slot key used by older versions
