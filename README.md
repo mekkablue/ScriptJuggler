@@ -50,7 +50,7 @@ The ring in the second column communicates two independent states at a glance:
 |------------|---------|
 | 🔘 — empty grey circle | Marked as **not done** |
 | 🟢 — solid green circle | Marked as **done** |
-| extra dot inside the circle | **has been run** at least once this session |
+| extra dot inside circle | **has been run** at least once this session |
 
 "Done" is a manual flag you set to track your progress through the workflow. "Played" is set automatically when a script has been executed—it resets each time you close and reopen the window.
 
@@ -87,10 +87,8 @@ When the script list has keyboard focus (click any row to give it focus):
 | `↑` / `↓` | Select previous/next script |
 | `Shift ↑` / `Shift ↓` | Extend selection up/down |
 | `Opt ↑` / `Opt ↓` | Select first/last script |
-| `Cmd ↑` | Move selected row(s) **one position up** |
-| `Cmd ↓` | Move selected row(s) **one position down** |
-| `Cmd Opt ↑` | Move selected row(s) to the **very top** |
-| `Cmd Opt ↓` | Move selected row(s) to the **very bottom** |
+| `Cmd ↑` / `Cmd ↓` | Move selected script(s) **one position up** / **down** |
+| `Cmd Opt ↑` / `Cmd Opt ↓` | Move selected script(s) to the very **top** / **bottom** |
 | `Space` | Toggle done status for all selected rows |
 | `Return` or `Enter` | Run the selected script (only when one row is selected) |
 | `Delete` or `Backspace` | Remove selected row(s) from the list |
@@ -126,12 +124,11 @@ Rows can be reordered by dragging. Only the **number column (#)** is the drag ha
 **To drag multiple rows:**
 
 1. First, select the rows you want to move (Shift-click or Cmd-click).
-2. Click and hold the **number** of any row that is already selected.
+2. Click and hold the **number** of any row that is selected.
 3. All selected rows are moved together as a group, keeping their relative order.
 4. Release to drop them at the blue line.
 
 If you click the number of an *unselected* row, only that single row is dragged regardless of the current selection.
-
 
 ### Searching
 
@@ -170,6 +167,7 @@ Click the **⋯ button** at the bottom left to open the actions menu:
 | **Save Preset** | Saves the current list to a `.plist` file. The save dialog defaults to the folder of the frontmost open font file. |
 | **Load Preset** | Opens a `.plist` file and replaces the current list. Done flags are restored; played-this-session state is reset. |
 | **Clear List** | Removes all rows. The ↺ undo button appears so you can recover the list if needed. |
+
 
 ### Preset files
 
