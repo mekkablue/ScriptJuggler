@@ -41,6 +41,12 @@ import GlyphsApp as _GlyphsAppModule
 from GlyphsApp import Glyphs
 
 
+# ─── ObjC class version ───────────────────────────────────────────────────────
+# Bump _SJ_VER whenever any ObjC class body changes.  PyObjC registers classes
+# globally per process; without versioning the stale class from the previous
+# script run would be reused, ignoring any code changes until Glyphs restarts.
+_SJ_VER = 2
+
 # ─── Constants ────────────────────────────────────────────────────────────────
 
 SCRIPTS_FOLDER = os.path.expanduser("~/Library/Application Support/Glyphs 3/Scripts")
@@ -299,8 +305,13 @@ except objc.error:
 # tableView:toolTipForCell:rect:... has a pointer-out param (rect), so PyObjC
 # requires the return value to be (string, rect).
 
+_TOOLTIP_CLASS_NAME = f"_SJTooltipProxy_v{_SJ_VER}"
 try:
-	class _SJTooltipProxy(NSObject):
+	objc.lookUpClass(_TOOLTIP_CLASS_NAME)
+	_SJTooltipProxy = objc.lookUpClass(_TOOLTIP_CLASS_NAME)
+	print(f"[SJTooltipProxy] using cached class {_TOOLTIP_CLASS_NAME}")
+except objc.error:
+	class _SJTooltipProxy_v2(NSObject):  # class name must match _SJ_VER above
 		_items            = None   # list of dicts; reassign whenever the list changes
 		_key              = "displayPath"
 		_originalDelegate = None
@@ -325,10 +336,9 @@ try:
 			if self._originalDelegate and self._originalDelegate.respondsToSelector_(sel):
 				return self._originalDelegate
 			return None
-	print("[SJTooltipProxy] FRESH class registered")
-except objc.error:
-	_SJTooltipProxy = objc.lookUpClass("_SJTooltipProxy")
-	print("[SJTooltipProxy] using STALE class from cache")
+
+	_SJTooltipProxy = _SJTooltipProxy_v2
+	print(f"[SJTooltipProxy] FRESH class registered: {_TOOLTIP_CLASS_NAME}")
 
 
 # ─── Drag-to-reorder data source proxy ───────────────────────────────────────
@@ -336,8 +346,13 @@ except objc.error:
 _DRAG_TYPE = "com.mekkablue.ScriptJuggler.rowDrag"
 
 
+_DRAG_CLASS_NAME = f"_SJDragSource_v{_SJ_VER}"
 try:
-	class _SJDragSource(NSObject):
+	objc.lookUpClass(_DRAG_CLASS_NAME)
+	_SJDragSource = objc.lookUpClass(_DRAG_CLASS_NAME)
+	print(f"[SJDragSource] using cached class {_DRAG_CLASS_NAME}")
+except objc.error:
+	class _SJDragSource_v2(NSObject):  # class name must match _SJ_VER above
 		"""
 		NSTableViewDataSource proxy for row drag-and-drop reorder.
 		Uses setData_forType_ / dataForType_ which works with any custom UTI.
@@ -457,10 +472,9 @@ try:
 				if self._originalDataSource.respondsToSelector_(sel):
 					return self._originalDataSource
 			return None
-	print("[SJDragSource] FRESH class registered")
-except objc.error:
-	_SJDragSource = objc.lookUpClass("_SJDragSource")
-	print("[SJDragSource] using STALE class from cache")
+
+	_SJDragSource = _SJDragSource_v2
+	print(f"[SJDragSource] FRESH class registered: {_DRAG_CLASS_NAME}")
 
 
 # ─── Table single-click handler ───────────────────────────────────────────────
