@@ -26,7 +26,7 @@ from AppKit import (
 	NSString, NSFont, NSForegroundColorAttributeName,
 	NSFontAttributeName, NSParagraphStyleAttributeName,
 	NSMutableParagraphStyle, NSLeftTextAlignment, NSRightTextAlignment,
-	NSPasteboard,
+	NSPasteboard, NSTableView
 )
 from Foundation import (
 	NSObject,
