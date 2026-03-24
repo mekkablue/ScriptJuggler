@@ -596,7 +596,7 @@ class ScriptJuggler:
 			autohidesScrollers=True,
 			drawVerticalLines=False,
 			drawHorizontalLines=False,
-			dragSettings=dict(type=_DRAG_TYPE),
+			dragSettings=dict(type=_DRAG_TYPE, callback=lambda sender, indexes: indexes),
 			selfApplicationDropSettings=dict(
 				type=_DRAG_TYPE,
 				allowDropBetweenRows=True,
@@ -792,10 +792,10 @@ class ScriptJuggler:
 
 	def _vanillaDrop(self, sender, dropInfo):
 		"""Vanilla drag-and-drop callback: reorder rows via mouse drag."""
-		if dropInfo.isProposal:
+		if dropInfo["isProposal"]:
 			return True
-		draggedItems = dropInfo.data  # list of dragged list-item dicts
-		targetRow    = dropInfo.rowIndex
+		draggedItems = dropInfo["data"]   # list of dragged list-item dicts
+		targetRow    = dropInfo["rowIndex"]
 		# Map dragged items back to current indices using the hidden _path key
 		allItems = sender.get()
 		pathToIdx = {item.get("_path", ""): i for i, item in enumerate(allItems)}
