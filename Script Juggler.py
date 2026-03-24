@@ -45,7 +45,7 @@ from GlyphsApp import Glyphs
 # Bump _SJ_VER whenever any ObjC class body changes.  PyObjC registers classes
 # globally per process; without versioning the stale class from the previous
 # script run would be reused, ignoring any code changes until Glyphs restarts.
-_SJ_VER = 2
+_SJ_VER = 3
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -311,7 +311,7 @@ try:
 	_SJTooltipProxy = objc.lookUpClass(_TOOLTIP_CLASS_NAME)
 	print(f"[SJTooltipProxy] using cached class {_TOOLTIP_CLASS_NAME}")
 except objc.error:
-	class _SJTooltipProxy_v2(NSObject):  # class name must match _SJ_VER above
+	class _SJTooltipProxy_v3(NSObject):  # class name must match _SJ_VER above
 		_items            = None   # list of dicts; reassign whenever the list changes
 		_key              = "displayPath"
 		_originalDelegate = None
@@ -337,7 +337,7 @@ except objc.error:
 				return self._originalDelegate
 			return None
 
-	_SJTooltipProxy = _SJTooltipProxy_v2
+	_SJTooltipProxy = _SJTooltipProxy_v3
 	print(f"[SJTooltipProxy] FRESH class registered: {_TOOLTIP_CLASS_NAME}")
 
 
@@ -352,7 +352,7 @@ try:
 	_SJDragSource = objc.lookUpClass(_DRAG_CLASS_NAME)
 	print(f"[SJDragSource] using cached class {_DRAG_CLASS_NAME}")
 except objc.error:
-	class _SJDragSource_v2(NSObject):  # class name must match _SJ_VER above
+	class _SJDragSource_v3(NSObject):  # class name must match _SJ_VER above
 		"""
 		NSTableViewDataSource proxy for row drag-and-drop reorder.
 		Uses setData_forType_ / dataForType_ which works with any custom UTI.
@@ -474,7 +474,7 @@ except objc.error:
 					return self._originalDataSource
 			return None
 
-	_SJDragSource = _SJDragSource_v2
+	_SJDragSource = _SJDragSource_v3
 	print(f"[SJDragSource] FRESH class registered: {_DRAG_CLASS_NAME}")
 
 
@@ -741,7 +741,9 @@ class ScriptJuggler:
 		self._dragDataSource._originalDataSource = tableView.dataSource()
 		self._dragDataSource._juggler = self
 		tableView.setDataSource_(self._dragDataSource)
+		print(f"[SJDragSource] setup: tableView class={tableView.className()}  NSDragOperationMove={NSDragOperationMove}")
 		tableView.setDraggingSourceOperationMask_forLocal_(NSDragOperationMove, True)
+		tableView.setDraggingSourceOperationMask_forLocal_(NSDragOperationMove, False)
 		tableView.registerForDraggedTypes_([_DRAG_TYPE, "public.utf8-plain-text"])
 
 		# Wire single-click action handler for play/done column clicks
@@ -955,10 +957,12 @@ class ScriptJuggler:
 	def _refreshList(self):
 		self._tooltipDelegate._items = self.entries   # re-point after any reassignment
 		self.w.scriptList.set(self._listItems())
-		# Debug: verify the drag proxy is still the data source after every set()
+		# Re-apply drag settings: vanilla's set() may reset them.
 		tv = self.w.scriptList.getNSTableView()
-		ds = tv.dataSource()
-		print(f"[SJDragSource] dataSource after _refreshList: {type(ds).__name__}")
+		tv.setDataSource_(self._dragDataSource)
+		tv.setDraggingSourceOperationMask_forLocal_(NSDragOperationMove, True)
+		tv.setDraggingSourceOperationMask_forLocal_(NSDragOperationMove, False)
+		tv.registerForDraggedTypes_([_DRAG_TYPE, "public.utf8-plain-text"])
 
 	def _syncEntriesFromList(self):
 		"""Rebuild self.entries in the order currently shown in the list."""
