@@ -617,7 +617,8 @@ class CollectWindow:
 		ctv.setDelegate_(self._tooltipDelegate)
 		# Enable tooltips (required for the delegate method to fire)
 		ctv.setToolTip_("")
-		print(f"[CollectWindow] tooltip delegate installed; {len(self._filtered)} scripts; sample doc={self._filtered[0].get('doc','')[:40]!r if self._filtered else 'N/A'}")
+		_sample = repr(self._filtered[0].get("doc", "")[:40]) if self._filtered else "N/A"
+		print(f"[CollectWindow] tooltip delegate installed; {len(self._filtered)} scripts; sample doc={_sample}")
 
 		self.w.cancelButton = vanilla.Button(
 			(-inset - 180, -40, -inset - 90, -inset), "Cancel", callback=self._cancel
