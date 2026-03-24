@@ -591,7 +591,7 @@ class ScriptJuggler:
 			autohidesScrollers=True,
 			drawVerticalLines=False,
 			drawHorizontalLines=False,
-			dragSettings=dict(type=_DRAG_TYPE, callback=lambda sender, indexes: indexes),
+			dragSettings=dict(type=_DRAG_TYPE, callback=lambda sender, indexes: [sender.get()[i] for i in indexes]),
 			selfApplicationDropSettings=dict(
 				type=_DRAG_TYPE,
 				allowDropBetweenRows=True,
@@ -624,6 +624,14 @@ class ScriptJuggler:
 		tableView.tableColumns()[COL_DONE].setDataCell_(_SJDoneCell.alloc().init())
 		tableView.tableColumns()[COL_TITLE].setDataCell_(_SJTitleCell.alloc().init())
 		tableView.tableColumns()[COL_PLAY].setDataCell_(_SJPlayCell.alloc().init())
+
+		# Only the title column should stretch when the window is resized.
+		# NSTableColumnAutoresizingMask=1; NSTableViewUniformColumnAutoresizingStyle=1
+		for col in tableView.tableColumns():
+			col.setResizingMask_(0)
+		tableView.tableColumns()[COL_TITLE].setResizingMask_(1)
+		tableView.setColumnAutoresizingStyle_(1)
+		tableView.sizeToFit()
 
 		# ── bottom bar ────────────────────────────────────────────────────────
 		self.w.bottomLine = vanilla.HorizontalLine((0, -BOTTOM_BAR_HEIGHT, -0, 1))
