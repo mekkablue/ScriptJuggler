@@ -90,19 +90,33 @@ def getMenuTitle(path):
 
 
 def getScriptDoc(path):
-	"""Extract the module __doc__ string from a script file."""
+	"""Extract the module __doc__ string from a script file.
+
+	Handles two conventions:
+	  1. Bare string literal as first statement (standard Python)
+	  2. __doc__ = '''...''' assignment (Glyphs script convention)
+	"""
 	try:
 		with open(path, "r", encoding="utf-8", errors="replace") as f:
 			source = f.read()
-		tree = ast.parse(source)
-		if (tree.body and isinstance(tree.body[0], ast.Expr)
-				and isinstance(tree.body[0].value, ast.Constant)
-				and isinstance(tree.body[0].value.value, str)):
-			doc = tree.body[0].value.value.strip()
-			# Clean up multiline docstrings
+		# Standard Python: bare string literal as first statement
+		try:
+			tree = ast.parse(source)
+			if (tree.body and isinstance(tree.body[0], ast.Expr)
+					and isinstance(tree.body[0].value, ast.Constant)
+					and isinstance(tree.body[0].value.value, str)):
+				doc = tree.body[0].value.value.strip()
+				lines = doc.split("\n")
+				if lines:
+					return "\n".join(line.rstrip() for line in lines).strip()
+		except SyntaxError:
+			pass
+		# Glyphs convention: __doc__ = """...""" or '''...''' assignment
+		m = re.search(r'__doc__\s*=\s*(?:"""(.*?)"""|\'\'\'(.*?)\'\'\')', source, re.DOTALL)
+		if m:
+			doc = (m.group(1) or m.group(2) or "").strip()
 			lines = doc.split("\n")
-			if lines:
-				return "\n".join(line.rstrip() for line in lines).strip()
+			return "\n".join(line.rstrip() for line in lines).strip()
 	except Exception:
 		pass
 	return ""
@@ -297,6 +311,7 @@ try:
 			text = ""
 			if self._items and 0 <= row < len(self._items):
 				text = self._items[row].get(self._key, "") or ""
+			print(f"[SJTooltip] delegate called row={row} key={self._key!r} items={len(self._items) if self._items else 'None'} text={text[:60]!r}")
 			return (text, rect)
 
 		def respondsToSelector_(self, sel):
@@ -310,8 +325,10 @@ try:
 			if self._originalDelegate and self._originalDelegate.respondsToSelector_(sel):
 				return self._originalDelegate
 			return None
+	print("[SJTooltipProxy] FRESH class registered")
 except objc.error:
 	_SJTooltipProxy = objc.lookUpClass("_SJTooltipProxy")
+	print("[SJTooltipProxy] using STALE class from cache")
 
 
 # ─── Drag-to-reorder data source proxy ───────────────────────────────────────
@@ -342,10 +359,14 @@ try:
 		# ── drag source (new API) ────────────────────────────────────────────────
 
 		def tableView_pasteboardWriterForRow_(self, tableView, row):
+			print(f"[SJDragSource] pasteboardWriterForRow: {row}")
 			encoded = str(row).encode("utf-8")
 			data = NSData.dataWithBytes_length_(encoded, len(encoded))
 			item = NSPasteboardItem.alloc().init()
 			item.setData_forType_(data, _DRAG_TYPE)
+			# Also write as plain text so the drag session always initiates
+			item.setString_forType_(str(row), "public.utf8-plain-text")
+			print(f"[SJDragSource] pasteboard item created OK for row {row}")
 			return item
 
 		# ── drag source (old API fallback) ───────────────────────────────────────
@@ -378,7 +399,8 @@ try:
 		def tableView_acceptDrop_row_dropOperation_(self, tableView, info, row, operation):
 			pboard = info.draggingPasteboard()
 			sourceRows = []
-			# New API: NSPasteboardItem list
+			print(f"[SJDragSource] acceptDrop at row={row}")
+			# New API: NSPasteboardItem list – check _DRAG_TYPE first, then plain text
 			for pbItem in (pboard.pasteboardItems() or []):
 				data = pbItem.dataForType_(_DRAG_TYPE)
 				if data:
@@ -387,6 +409,14 @@ try:
 							sourceRows.append(int(tok.strip()))
 					except (ValueError, UnicodeDecodeError):
 						pass
+				if not sourceRows:
+					s = pbItem.stringForType_("public.utf8-plain-text")
+					if s:
+						try:
+							for tok in str(s).split(","):
+								sourceRows.append(int(tok.strip()))
+						except (ValueError, UnicodeDecodeError):
+							pass
 			# Old API fallback: flat NSData on pasteboard
 			if not sourceRows:
 				data = pboard.dataForType_(_DRAG_TYPE)
@@ -396,6 +426,7 @@ try:
 							sourceRows.append(int(tok.strip()))
 					except (ValueError, UnicodeDecodeError):
 						pass
+			print(f"[SJDragSource] sourceRows={sourceRows}")
 			if not sourceRows:
 				return False
 			if self._juggler:
@@ -416,8 +447,10 @@ try:
 				if self._originalDataSource.respondsToSelector_(sel):
 					return self._originalDataSource
 			return None
+	print("[SJDragSource] FRESH class registered")
 except objc.error:
 	_SJDragSource = objc.lookUpClass("_SJDragSource")
+	print("[SJDragSource] using STALE class from cache")
 
 
 # ─── Table single-click handler ───────────────────────────────────────────────
@@ -582,6 +615,9 @@ class CollectWindow:
 		self._tooltipDelegate._key   = "doc"
 		self._tooltipDelegate._originalDelegate = ctv.delegate()
 		ctv.setDelegate_(self._tooltipDelegate)
+		# Enable tooltips (required for the delegate method to fire)
+		ctv.setToolTip_("")
+		print(f"[CollectWindow] tooltip delegate installed; {len(self._filtered)} scripts; sample doc={self._filtered[0].get('doc','')[:40]!r if self._filtered else 'N/A'}")
 
 		self.w.cancelButton = vanilla.Button(
 			(-inset - 180, -40, -inset - 90, -inset), "Cancel", callback=self._cancel
@@ -680,7 +716,7 @@ class ScriptJuggler:
 		self._dragDataSource._juggler = self
 		tableView.setDataSource_(self._dragDataSource)
 		tableView.setDraggingSourceOperationMask_forLocal_(NSDragOperationMove, True)
-		tableView.registerForDraggedTypes_([_DRAG_TYPE])
+		tableView.registerForDraggedTypes_([_DRAG_TYPE, "public.utf8-plain-text"])
 
 		# Wire single-click action handler for play/done column clicks
 		self._tableClickHandler = _SJTableClickHandler.alloc().init()
