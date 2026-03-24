@@ -41,7 +41,7 @@ from GlyphsApp import Glyphs
 # Bump _SJ_VER whenever the body of an ObjC proxy class changes.  PyObjC
 # registers class names globally per process; the version suffix forces a new
 # registration instead of reusing the stale cached class from the last run.
-_SJ_VER = 3
+_SJ_VER = 4
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -313,9 +313,8 @@ _TOOLTIP_CLASS_NAME = f"_SJTooltipProxy_v{_SJ_VER}"
 try:
 	objc.lookUpClass(_TOOLTIP_CLASS_NAME)
 	_SJTooltipProxy = objc.lookUpClass(_TOOLTIP_CLASS_NAME)
-	print(f"[SJTooltipProxy] using cached class {_TOOLTIP_CLASS_NAME}")
 except objc.error:
-	class _SJTooltipProxy_v3(NSObject):  # class name must match _SJ_VER above
+	class _SJTooltipProxy_v4(NSObject):  # class name must match _SJ_VER above
 		_items            = None   # list of dicts; reassign whenever the list changes
 		_key              = "displayPath"
 		_originalDelegate = None
@@ -325,8 +324,7 @@ except objc.error:
 		):
 			text = ""
 			if self._items and 0 <= row < len(self._items):
-				text = self._items[row].get(self._key, "") or ""
-			print(f"[SJTooltip] delegate called row={row} key={self._key!r} items={len(self._items) if self._items else 'None'} text={text[:60]!r}")
+				text = (self._items[row].get(self._key, "") or "").strip()
 			return (text, rect)
 
 		def respondsToSelector_(self, sel):
@@ -341,8 +339,7 @@ except objc.error:
 				return self._originalDelegate
 			return None
 
-	_SJTooltipProxy = _SJTooltipProxy_v3
-	print(f"[SJTooltipProxy] FRESH class registered: {_TOOLTIP_CLASS_NAME}")
+	_SJTooltipProxy = _SJTooltipProxy_v4
 
 
 # ─── Drag-to-reorder data source proxy ───────────────────────────────────────
@@ -516,8 +513,6 @@ class CollectWindow:
 		ctv.setDelegate_(self._tooltipDelegate)
 		# Enable tooltips (required for the delegate method to fire)
 		ctv.setToolTip_("")
-		_sample = repr(self._filtered[0].get("doc", "")[:40]) if self._filtered else "N/A"
-		print(f"[CollectWindow] tooltip delegate installed; {len(self._filtered)} scripts; sample doc={_sample}")
 
 		self.w.cancelButton = vanilla.Button(
 			(-inset - 180, -40, -inset - 90, -inset), "Cancel", callback=self._cancel
@@ -792,6 +787,7 @@ class ScriptJuggler:
 
 	def _vanillaDrop(self, sender, dropInfo):
 		"""Vanilla drag-and-drop callback: reorder rows via mouse drag."""
+		print(f"[drag] _vanillaDrop called; isProposal={dropInfo['isProposal']}  rowIndex={dropInfo['rowIndex']}  data={dropInfo['data']!r}")
 		if dropInfo["isProposal"]:
 			return True
 		draggedItems = dropInfo["data"]   # list of dragged list-item dicts
@@ -801,8 +797,12 @@ class ScriptJuggler:
 		pathToIdx = {item.get("_path", ""): i for i, item in enumerate(allItems)}
 		sourceRows = [pathToIdx[item["_path"]] for item in draggedItems
 		              if item.get("_path", "") in pathToIdx]
+		print(f"[drag] sourceRows={sourceRows}  targetRow={targetRow}")
 		if sourceRows:
 			self._moveRows(sourceRows, targetRow)
+		else:
+			print(f"[drag] no sourceRows resolved – draggedItems paths: {[i.get('_path') for i in draggedItems]}")
+			print(f"[drag] pathToIdx keys: {list(pathToIdx)[:5]} ...")
 		return True
 
 	def _moveRows(self, sourceRows, toRow):
