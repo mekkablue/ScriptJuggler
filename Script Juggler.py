@@ -19,9 +19,6 @@ from AppKit import (
 	NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn,
 	NSSavePanel, NSOpenPanel, NSModalResponseOK,
 	NSEvent, NSKeyDownMask, NSEventModifierFlagCommand,
-	NSDragOperationMove,
-	NSTableViewDropAbove,
-	NSPasteboardItem,
 	NSTextAlignmentCenter,
 	NSBezierPath,
 	NSCell,
@@ -35,16 +32,15 @@ from Foundation import (
 	NSObject,
 	NSPropertyListSerialization,
 	NSPropertyListXMLFormat_v1_0,
-	NSData, NSURL, NSIndexSet,
+	NSData, NSURL,
 )
 import GlyphsApp as _GlyphsAppModule
 from GlyphsApp import Glyphs
 
 
-# ─── ObjC class version ───────────────────────────────────────────────────────
-# Bump _SJ_VER whenever any ObjC class body changes.  PyObjC registers classes
-# globally per process; without versioning the stale class from the previous
-# script run would be reused, ignoring any code changes until Glyphs restarts.
+# Bump _SJ_VER whenever the body of an ObjC proxy class changes.  PyObjC
+# registers class names globally per process; the version suffix forces a new
+# registration instead of reusing the stale cached class from the last run.
 _SJ_VER = 3
 
 # ─── Constants ────────────────────────────────────────────────────────────────
@@ -96,36 +92,44 @@ def getMenuTitle(path):
 
 
 def getScriptDoc(path):
-	"""Extract the module __doc__ string from a script file.
+	"""Read __doc__ from a .py file without importing it.
 
-	Handles two conventions:
-	  1. Bare string literal as first statement (standard Python)
-	  2. __doc__ = '''...''' assignment (Glyphs script convention)
+	Handles both conventions used in Glyphs scripts:
+	  1. Module docstring  (bare triple-quoted string as the first statement)
+	  2. __doc__ = "..."  (explicit assignment, the Glyphs script convention)
+	  3. __doc__: str = "..."  (annotated assignment)
+
+	SyntaxWarnings from scripts that contain invalid escape sequences (common in
+	Glyphs scripts, e.g. regex strings with \\{) are suppressed.
 	"""
+	import warnings
 	try:
 		with open(path, "r", encoding="utf-8", errors="replace") as f:
 			source = f.read()
-		# Standard Python: bare string literal as first statement
-		try:
-			tree = ast.parse(source)
-			if (tree.body and isinstance(tree.body[0], ast.Expr)
-					and isinstance(tree.body[0].value, ast.Constant)
-					and isinstance(tree.body[0].value.value, str)):
-				doc = tree.body[0].value.value.strip()
-				lines = doc.split("\n")
-				if lines:
-					return "\n".join(line.rstrip() for line in lines).strip()
-		except SyntaxError:
-			pass
-		# Glyphs convention: __doc__ = """...""" or '''...''' assignment
-		m = re.search(r'__doc__\s*=\s*(?:"""(.*?)"""|\'\'\'(.*?)\'\'\')', source, re.DOTALL)
-		if m:
-			doc = (m.group(1) or m.group(2) or "").strip()
-			lines = doc.split("\n")
-			return "\n".join(line.rstrip() for line in lines).strip()
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore", SyntaxWarning)
+			try:
+				tree = ast.parse(source)
+			except SyntaxError:
+				return ""
+		for node in ast.walk(tree):
+			if isinstance(node, ast.Assign):
+				for target in node.targets:
+					if isinstance(target, ast.Name) and target.id == "__doc__":
+						try:
+							return ast.literal_eval(node.value) or ""
+						except (ValueError, TypeError):
+							return ""
+			elif isinstance(node, ast.AnnAssign):
+				if isinstance(node.target, ast.Name) and node.target.id == "__doc__":
+					if node.value is not None:
+						try:
+							return ast.literal_eval(node.value) or ""
+						except (ValueError, TypeError):
+							return ""
+		return ast.get_docstring(tree) or ""
 	except Exception:
-		pass
-	return ""
+		return ""
 
 
 def collectAllScripts():
@@ -346,136 +350,6 @@ except objc.error:
 _DRAG_TYPE = "com.mekkablue.ScriptJuggler.rowDrag"
 
 
-_DRAG_CLASS_NAME = f"_SJDragSource_v{_SJ_VER}"
-try:
-	objc.lookUpClass(_DRAG_CLASS_NAME)
-	_SJDragSource = objc.lookUpClass(_DRAG_CLASS_NAME)
-	print(f"[SJDragSource] using cached class {_DRAG_CLASS_NAME}")
-except objc.error:
-	class _SJDragSource_v3(NSObject):  # class name must match _SJ_VER above
-		"""
-		NSTableViewDataSource proxy for row drag-and-drop reorder.
-		Uses setData_forType_ / dataForType_ which works with any custom UTI.
-		setString_forType_ requires a text-conforming UTI and silently fails for
-		custom types, leaving an empty pasteboard that rejects all drops.
-		Implements both the modern pasteboardWriterForRow: API and the older
-		writeRowsWithIndexes:toPasteboard: fallback.
-		"""
-		_originalDataSource = None
-		_juggler = None
-
-		_ownSelectors = frozenset({
-			"tableView:pasteboardWriterForRow:",
-			"tableView:canDragRowsWithIndexes:atPoint:",
-			"tableView:validateDrop:proposedRow:proposedDropOperation:",
-			"tableView:acceptDrop:row:dropOperation:",
-			"tableView:writeRowsWithIndexes:toPasteboard:",
-		})
-
-		# ── drag gate ────────────────────────────────────────────────────────────
-
-		def tableView_canDragRowsWithIndexes_atPoint_(self, tableView, rowIndexes, point):
-			print(f"[SJDragSource] canDragRowsWithIndexes called")
-			return True
-
-		# ── drag source (new API) ────────────────────────────────────────────────
-
-		def tableView_pasteboardWriterForRow_(self, tableView, row):
-			print(f"[SJDragSource] pasteboardWriterForRow: {row}")
-			encoded = str(row).encode("utf-8")
-			data = NSData.dataWithBytes_length_(encoded, len(encoded))
-			item = NSPasteboardItem.alloc().init()
-			item.setData_forType_(data, _DRAG_TYPE)
-			# Also write as plain text so the drag session always initiates
-			item.setString_forType_(str(row), "public.utf8-plain-text")
-			print(f"[SJDragSource] pasteboard item created OK for row {row}")
-			return item
-
-		# ── drag source (old API fallback) ───────────────────────────────────────
-
-		def tableView_writeRowsWithIndexes_toPasteboard_(self, tableView, indexSet, pboard):
-			print(f"[SJDragSource] writeRowsWithIndexes called; indexSet={indexSet}")
-			rows = []
-			idx = indexSet.firstIndex()
-			while idx != NSNotFound:
-				rows.append(idx)
-				idx = indexSet.indexGreaterThanIndex_(idx)
-			if not rows:
-				return False
-			encoded = (",".join(str(i) for i in rows)).encode("utf-8")
-			data = NSData.dataWithBytes_length_(encoded, len(encoded))
-			pboard.clearContents()
-			pboard.declareTypes_owner_([_DRAG_TYPE], None)
-			pboard.setData_forType_(data, _DRAG_TYPE)
-			return True
-
-		# ── drag destination: validate ───────────────────────────────────────────
-
-		def tableView_validateDrop_proposedRow_proposedDropOperation_(
-			self, tableView, info, row, operation
-		):
-			tableView.setDropRow_dropOperation_(row, NSTableViewDropAbove)
-			return NSDragOperationMove
-
-		# ── drag destination: accept ─────────────────────────────────────────────
-
-		def tableView_acceptDrop_row_dropOperation_(self, tableView, info, row, operation):
-			pboard = info.draggingPasteboard()
-			sourceRows = []
-			print(f"[SJDragSource] acceptDrop at row={row}")
-			# New API: NSPasteboardItem list – check _DRAG_TYPE first, then plain text
-			for pbItem in (pboard.pasteboardItems() or []):
-				data = pbItem.dataForType_(_DRAG_TYPE)
-				if data:
-					try:
-						for tok in bytes(data).decode("utf-8").split(","):
-							sourceRows.append(int(tok.strip()))
-					except (ValueError, UnicodeDecodeError):
-						pass
-				if not sourceRows:
-					s = pbItem.stringForType_("public.utf8-plain-text")
-					if s:
-						try:
-							for tok in str(s).split(","):
-								sourceRows.append(int(tok.strip()))
-						except (ValueError, UnicodeDecodeError):
-							pass
-			# Old API fallback: flat NSData on pasteboard
-			if not sourceRows:
-				data = pboard.dataForType_(_DRAG_TYPE)
-				if data:
-					try:
-						for tok in bytes(data).decode("utf-8").split(","):
-							sourceRows.append(int(tok.strip()))
-					except (ValueError, UnicodeDecodeError):
-						pass
-			print(f"[SJDragSource] sourceRows={sourceRows}")
-			if not sourceRows:
-				return False
-			if self._juggler:
-				self._juggler._moveRows(sorted(sourceRows), row)
-			return True
-
-		# ── forwarding ───────────────────────────────────────────────────────────
-
-		def respondsToSelector_(self, sel):
-			selStr = str(sel)
-			if "Drag" in selStr or "Drop" in selStr or "drag" in selStr or "drop" in selStr or "pasteboard" in selStr.lower():
-				print(f"[SJDragSource] respondsToSelector: {selStr!r}")
-			if selStr in self._ownSelectors:
-				return True
-			if self._originalDataSource:
-				return self._originalDataSource.respondsToSelector_(sel)
-			return False
-
-		def forwardingTargetForSelector_(self, sel):
-			if str(sel) not in self._ownSelectors and self._originalDataSource:
-				if self._originalDataSource.respondsToSelector_(sel):
-					return self._originalDataSource
-			return None
-
-	_SJDragSource = _SJDragSource_v3
-	print(f"[SJDragSource] FRESH class registered: {_DRAG_CLASS_NAME}")
 
 
 # ─── Table single-click handler ───────────────────────────────────────────────
@@ -722,6 +596,13 @@ class ScriptJuggler:
 			autohidesScrollers=True,
 			drawVerticalLines=False,
 			drawHorizontalLines=False,
+			dragSettings=dict(type=_DRAG_TYPE),
+			selfApplicationDropSettings=dict(
+				type=_DRAG_TYPE,
+				allowDropBetweenRows=True,
+				allowDropOnRow=False,
+				callback=self._vanillaDrop,
+			),
 		)
 
 		tableView = self.w.scriptList.getNSTableView()
@@ -736,15 +617,6 @@ class ScriptJuggler:
 		self._tooltipDelegate._originalDelegate = tableView.delegate()
 		tableView.setDelegate_(self._tooltipDelegate)
 
-		# Install drag-reorder data source (chained)
-		self._dragDataSource = _SJDragSource.alloc().init()
-		self._dragDataSource._originalDataSource = tableView.dataSource()
-		self._dragDataSource._juggler = self
-		tableView.setDataSource_(self._dragDataSource)
-		print(f"[SJDragSource] setup: tableView class={tableView.className()}  NSDragOperationMove={NSDragOperationMove}")
-		tableView.setDraggingSourceOperationMask_forLocal_(NSDragOperationMove, True)
-		tableView.setDraggingSourceOperationMask_forLocal_(NSDragOperationMove, False)
-		tableView.registerForDraggedTypes_([_DRAG_TYPE, "public.utf8-plain-text"])
 
 		# Wire single-click action handler for play/done column clicks
 		self._tableClickHandler = _SJTableClickHandler.alloc().init()
@@ -918,8 +790,23 @@ class ScriptJuggler:
 		if row >= 0 and row < len(self.entries) and col == COL_TITLE:
 			self._runEntry(row)
 
+	def _vanillaDrop(self, sender, dropInfo):
+		"""Vanilla drag-and-drop callback: reorder rows via mouse drag."""
+		if dropInfo.isProposal:
+			return True
+		draggedItems = dropInfo.data  # list of dragged list-item dicts
+		targetRow    = dropInfo.rowIndex
+		# Map dragged items back to current indices using the hidden _path key
+		allItems = sender.get()
+		pathToIdx = {item.get("_path", ""): i for i, item in enumerate(allItems)}
+		sourceRows = [pathToIdx[item["_path"]] for item in draggedItems
+		              if item.get("_path", "") in pathToIdx]
+		if sourceRows:
+			self._moveRows(sourceRows, targetRow)
+		return True
+
 	def _moveRows(self, sourceRows, toRow):
-		"""Move one or more rows to a new position (called from _RowDragDataSource)."""
+		"""Move one or more rows to a new position."""
 		sourceRows = sorted(sourceRows)
 		if not sourceRows:
 			return
@@ -957,12 +844,6 @@ class ScriptJuggler:
 	def _refreshList(self):
 		self._tooltipDelegate._items = self.entries   # re-point after any reassignment
 		self.w.scriptList.set(self._listItems())
-		# Re-apply drag settings: vanilla's set() may reset them.
-		tv = self.w.scriptList.getNSTableView()
-		tv.setDataSource_(self._dragDataSource)
-		tv.setDraggingSourceOperationMask_forLocal_(NSDragOperationMove, True)
-		tv.setDraggingSourceOperationMask_forLocal_(NSDragOperationMove, False)
-		tv.registerForDraggedTypes_([_DRAG_TYPE, "public.utf8-plain-text"])
 
 	def _syncEntriesFromList(self):
 		"""Rebuild self.entries in the order currently shown in the list."""
