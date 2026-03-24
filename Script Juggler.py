@@ -26,7 +26,8 @@ from AppKit import (
 	NSString, NSFont, NSForegroundColorAttributeName,
 	NSFontAttributeName, NSParagraphStyleAttributeName,
 	NSMutableParagraphStyle, NSLeftTextAlignment, NSRightTextAlignment,
-	NSPasteboard, NSTableView
+	NSPasteboard, NSTableView,
+	NSView, NSImage, NSImageView, NSPanel,
 )
 from Foundation import (
 	NSObject,
@@ -460,6 +461,16 @@ except objc.error:
 	_SJTitleCell = objc.lookUpClass("_SJTitleCell")
 
 
+try:
+	class _SJDropLine(NSView):
+		"""Thin horizontal blue bar used as drag-reorder drop indicator."""
+		def drawRect_(self, rect):
+			NSColor.systemBlueColor().set()
+			NSBezierPath.fillRect_(self.bounds())
+except objc.error:
+	_SJDropLine = objc.lookUpClass("_SJDropLine")
+
+
 # ─── Collect window ───────────────────────────────────────────────────────────
 
 class CollectWindow:
@@ -565,7 +576,9 @@ class ScriptJuggler:
 		self._hasUnsaved = False
 		self._keyMonitor   = None
 		self._mouseMonitor = None
-		self._numDrag      = {'active': False, 'srcRow': -1}
+		self._numDrag      = {'active': False, 'srcRow': -1, 'sourceRows': [], 'ghostImg': None, 'ghostSize': None}
+		self._dropLine     = None
+		self._ghostPanel   = None
 		self._collectWindow = None
 
 		# ── build window ──────────────────────────────────────────────────────
@@ -634,6 +647,11 @@ class ScriptJuggler:
 		tableView.tableColumns()[COL_TITLE].setResizingMask_(1)
 		tableView.setColumnAutoresizingStyle_(1)
 		tableView.sizeToFit()
+
+		# Add drop indicator line (hidden until a COL_NUM drag is active)
+		self._dropLine = _SJDropLine.alloc().initWithFrame_(((0, -4), (100, 2)))
+		self._dropLine.setHidden_(True)
+		tableView.addSubview_(self._dropLine)
 
 		# ── bottom bar ────────────────────────────────────────────────────────
 		self.w.bottomLine = vanilla.HorizontalLine((0, -BOTTOM_BAR_HEIGHT, -0, 1))
@@ -716,43 +734,47 @@ class ScriptJuggler:
 				tv = _self.w.scriptList.getNSTableView()
 				if event.window() != tv.window():
 					return event
-				pt  = tv.convertPoint_fromView_(event.locationInWindow(), None)
-				et  = int(event.type())
-				nd  = _self._numDrag
+				pt = tv.convertPoint_fromView_(event.locationInWindow(), None)
+				et = int(event.type())
+				nd = _self._numDrag
 
 				if et == 1:  # leftMouseDown
 					col = tv.columnAtPoint_(pt)
 					row = tv.rowAtPoint_(pt)
-					print(f"[drag] mouseDown col={col} row={row}")
 					if col == COL_NUM and row >= 0:
-						nd['active'] = True
-						nd['srcRow'] = row
+						selected         = sorted(tv.selectedRowIndexes())
+						nd['sourceRows'] = selected if row in selected else [row]
+						nd['srcRow']     = row
+						nd['active']     = True
+						# Capture ghost image now, before any drop indicator appears
+						nd['ghostImg'], nd['ghostSize'] = _self._captureGhost_(tv, nd['sourceRows'])
 						return None  # suppress: no selection change
 					else:
 						nd['active'] = False
 
 				elif et == 6 and nd['active']:  # leftMouseDragged
-					print(f"[drag] dragged srcRow={nd['srcRow']} pt=({pt.x:.0f},{pt.y:.0f})")
+					targetRow = _self._dropRow_(tv, pt)
+					_self._showDropLine_(tv, targetRow)
+					# Create ghost panel on first drag event; move on subsequent ones
+					if nd['ghostImg'] and not _self._ghostPanel:
+						_self._ghostPanel = _self._openGhost_(nd['ghostImg'], nd['ghostSize'])
+					_self._moveGhost_(nd['ghostSize'])
 					return None  # suppress vanilla drag start
 
 				elif et == 2 and nd['active']:  # leftMouseUp
-					srcRow = nd['srcRow']
-					n      = len(_self.entries)
-					row    = tv.rowAtPoint_(pt)
-					if row < 0:
-						targetRow = 0 if pt.y <= 0 else n
-					else:
-						rect      = tv.rectOfRow_(row)
-						targetRow = row + 1 if pt.y >= rect.origin.y + rect.size.height * 0.5 else row
-					selected   = sorted(tv.selectedRowIndexes())
-					sourceRows = selected if srcRow in selected else [srcRow]
-					print(f"[drag] mouseUp sourceRows={sourceRows} targetRow={targetRow}")
+					# Tear down visuals
+					if _self._dropLine:
+						_self._dropLine.setHidden_(True)
+					_self._closeGhost_()
+					# Perform the reorder
+					targetRow  = _self._dropRow_(tv, pt)
+					sourceRows = nd.get('sourceRows') or [nd['srcRow']]
 					_self._moveRows(sourceRows, targetRow)
 					nd['active'] = False
 					return None  # suppress
 
 			except Exception:
-				pass
+				import traceback; traceback.print_exc()
 			return event
 
 		self._mouseMonitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
@@ -793,6 +815,88 @@ class ScriptJuggler:
 		if self._mouseMonitor:
 			NSEvent.removeMonitor_(self._mouseMonitor)
 			self._mouseMonitor = None
+		self._closeGhost_()
+
+	# ── list interaction ──────────────────────────────────────────────────────
+
+	# ── drag-reorder helpers ──────────────────────────────────────────────────
+
+	def _dropRow_(self, tv, pt):
+		"""Return insertion index (0..n) for a drop at point pt (tableView coords)."""
+		n   = len(self.entries)
+		row = tv.rowAtPoint_(pt)
+		if row < 0:
+			return 0 if pt.y <= 0 else n
+		rect = tv.rectOfRow_(row)
+		return row + 1 if pt.y >= rect.origin.y + rect.size.height * 0.5 else row
+
+	def _showDropLine_(self, tv, targetRow):
+		"""Position and show the blue drop indicator at the targetRow boundary."""
+		line = self._dropLine
+		if not line:
+			return
+		n = len(self.entries)
+		if n == 0:
+			line.setHidden_(True)
+			return
+		if targetRow <= 0:
+			y = tv.rectOfRow_(0).origin.y
+		elif targetRow >= n:
+			r = tv.rectOfRow_(n - 1)
+			y = r.origin.y + r.size.height
+		else:
+			y = tv.rectOfRow_(targetRow).origin.y
+		line.setFrame_(((0, y - 1), (tv.bounds().size.width, 2)))
+		line.setHidden_(False)
+
+	def _captureGhost_(self, tv, sourceRows):
+		"""Return (NSImage, (w, h)) by rendering sourceRows as PDF from tableView."""
+		try:
+			rows = sorted(sourceRows)
+			top  = tv.rectOfRow_(rows[0])
+			bot  = tv.rectOfRow_(rows[-1])
+			rect = ((top.origin.x, top.origin.y),
+			        (top.size.width, bot.origin.y + bot.size.height - top.origin.y))
+			data = tv.dataWithPDFInsideRect_(rect)
+			if not data or not len(data):
+				return None, None
+			img  = NSImage.alloc().initWithData_(data)
+			return img, (rect[1][0], rect[1][1])
+		except Exception:
+			return None, None
+
+	def _openGhost_(self, img, size):
+		"""Create a borderless floating panel showing img at 70 % opacity."""
+		w, h = size
+		# NSWindowStyleMaskBorderless=0, NSBackingStoreBuffered=2
+		panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+			((0, 0), (w, h)), 0, 2, False
+		)
+		panel.setAlphaValue_(0.7)
+		panel.setIgnoresMouseEvents_(True)
+		panel.setOpaque_(False)
+		panel.setBackgroundColor_(NSColor.clearColor())
+		panel.setLevel_(3)  # NSFloatingWindowLevel
+		iv = NSImageView.alloc().initWithFrame_(((0, 0), (w, h)))
+		iv.setImage_(img)
+		panel.contentView().addSubview_(iv)
+		self._moveGhost_(size, panel=panel)
+		panel.orderFront_(None)
+		return panel
+
+	def _moveGhost_(self, size, panel=None):
+		"""Reposition ghost panel so its top-left is offset 10 px from cursor."""
+		p = panel or self._ghostPanel
+		if not p or not size:
+			return
+		w, h    = size
+		mouse   = NSEvent.mouseLocation()
+		p.setFrameOrigin_((mouse.x + 10, mouse.y - h - 2))
+
+	def _closeGhost_(self):
+		if self._ghostPanel:
+			self._ghostPanel.close()
+			self._ghostPanel = None
 
 	# ── list interaction ──────────────────────────────────────────────────────
 
