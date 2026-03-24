@@ -2,25 +2,22 @@
 
 **Script Juggler** is a floating workflow manager for [Glyphs.app](https://glyphsapp.com). It lets you collect any subset of your installed Glyphs scripts into an ordered list, run them one by one (or selectively), mark them done, and save the whole setup as a reusable preset—all without leaving Glyphs.
 
----
 
 ## Installation
 
-Place `Script Juggler.py` in your Glyphs Scripts folder (typically `~/Library/Application Support/Glyphs 3/Scripts/`) or any subfolder. Reload Scripts (`Script > Refresh Scripts` or `⌥⌘⇧Y`). The script appears in your Script menu.
+Look for *Script Juggler* in *Window > Plugin Manager > Scripts,* then click the *Install* button next to it. Once you are done, hold down the Opt key and choose *Script > Reload Scripts* (Cmd-Opt-Shift-Y).
 
----
 
 ## Opening the window
 
-Run **Script Juggler** from the Glyphs Script menu. The window is non-modal and can stay open while you work. You can run the script a second time to open a second, independent window—each window maintains its own list.
+Run **Script Juggler** from the Glyphs *Script* menu. The window is non-modal and can stay open while you work. You can run the script a second time to open a second, independent window—each window maintains its own list.
 
----
 
 ## The main window
 
 ```
+   #  ●  Script Name              ▶ 
 ┌────────────────────────────────────┐
-│  #  ●  Script Name              ▶  │
 │  1  ○  Check Glyph Names        ▶  │
 │  2  ●  Decompose Compounds      ▶  │
 │  3  ○  Remove Overlap           ▶  │
@@ -39,7 +36,11 @@ Each row has four columns:
 | **Title** | Script name | Hover to see full path; double-click to run |
 | **▶** | Play button | Click to run the script immediately |
 
----
+
+## Adding scripts — the Collect dialog
+
+Click the **plus button** at the bottom right to open the *Collect* dialog. This dialog lists every script in your Glyphs Scripts folder that has a `# MenuTitle:` declaration.
+
 
 ## The ring indicator
 
@@ -55,7 +56,6 @@ The ring in the second column communicates two independent states at a glance:
 
 Hover over the ring column header to see a quick-reference tooltip.
 
----
 
 ## Running scripts
 
@@ -67,7 +67,6 @@ There are three ways to run a script:
 
 After a script runs, its ring gains an inner dot to show it was played this session. Errors are reported in the Glyphs Macro Window, which opens automatically on failure.
 
----
 
 ## Marking scripts done
 
@@ -78,7 +77,6 @@ There are two ways to toggle the "done" flag:
 
 Done status is saved automatically and restored when you reopen the window.
 
----
 
 ## Keyboard navigation
 
@@ -99,7 +97,6 @@ When the script list has keyboard focus (click any row to give it focus):
 
 When moving multiple rows, their relative order is preserved. The selection moves with the rows.
 
----
 
 ## Selecting rows
 
@@ -114,7 +111,6 @@ Script Juggler uses standard macOS list selection:
 
 Multiple selected rows can be moved, toggled done, deleted, or dragged all at once.
 
----
 
 ## Drag-to-reorder
 
@@ -136,11 +132,6 @@ Rows can be reordered by dragging. Only the **number column (#)** is the drag ha
 
 If you click the number of an *unselected* row, only that single row is dragged regardless of the current selection.
 
----
-
-## Adding scripts — the Collect dialog
-
-Click the **`+` button** at the bottom right to open the Collect dialog. This dialog lists every script in your Glyphs Scripts folder that has a `# MenuTitle:` declaration.
 
 ### Searching
 
@@ -162,19 +153,13 @@ Scripts are inserted immediately after the last selected row in the main list (o
 
 Hovering over any script in the list shows its `__doc__` string as a tooltip, so you can read a short description before adding it.
 
----
 
-## Deleting scripts from the list
+## Removing scripts from the list
 
 Select one or more rows and press `Delete` or `Backspace`. The entries are removed from the list and the **↺ undo button** appears at the bottom left.
 
----
-
-## Undoing a deletion
-
 The **↺ button** (bottom left, shown only after a deletion or clear) restores the entire list to the state it was in just before the last destructive action. Only the most recent operation can be undone; once you undo, the button disappears.
 
----
 
 ## The Actions menu (⋯)
 
@@ -190,7 +175,6 @@ Click the **⋯ button** at the bottom left to open the actions menu:
 
 Presets are standard XML property-list (`.plist`) files and can be shared between machines. They store each script's file path, display title, and done state. If a preset references a script that no longer exists at the saved path, that entry will still appear in the list—it will just fail to run with a message in the Macro Window.
 
----
 
 ## Auto-save and persistence
 
@@ -198,11 +182,6 @@ The list is saved automatically to Glyphs' persistent preferences on every chang
 
 Each open Script Juggler window saves its contents independently (keyed by window order). If you run Script Juggler twice, each window remembers its own list across sessions.
 
----
-
-## Multiple windows
-
-Run Script Juggler from the Script menu a second time to open a second, independent window. Each window has its own list, its own done states, and its own persistent auto-save slot.
 
 ---
 
