@@ -394,6 +394,7 @@ except objc.error:
 		# ── drag source (old API fallback) ───────────────────────────────────────
 
 		def tableView_writeRowsWithIndexes_toPasteboard_(self, tableView, indexSet, pboard):
+			print(f"[SJDragSource] writeRowsWithIndexes called; indexSet={indexSet}")
 			rows = []
 			idx = indexSet.firstIndex()
 			while idx != NSNotFound:
@@ -954,6 +955,10 @@ class ScriptJuggler:
 	def _refreshList(self):
 		self._tooltipDelegate._items = self.entries   # re-point after any reassignment
 		self.w.scriptList.set(self._listItems())
+		# Debug: verify the drag proxy is still the data source after every set()
+		tv = self.w.scriptList.getNSTableView()
+		ds = tv.dataSource()
+		print(f"[SJDragSource] dataSource after _refreshList: {type(ds).__name__}")
 
 	def _syncEntriesFromList(self):
 		"""Rebuild self.entries in the order currently shown in the list."""
