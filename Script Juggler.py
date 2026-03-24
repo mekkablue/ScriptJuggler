@@ -439,17 +439,18 @@ except objc.error:
 
 
 try:
-	class _SJTitleCell(NSCell):
+	class _SJTitleCell_v5(NSCell):
 		"""Left-aligned title text, vertically centered in row."""
 
 		def drawWithFrame_inView_(self, frame, view):
 			val = self.objectValue() or ""
 			para = NSMutableParagraphStyle.alloc().init()
 			para.setAlignment_(NSLeftTextAlignment)
+			para.setLineBreakMode_(2)  # NSLineBreakByClipping – char-level, no ellipsis
 			hi = self.isHighlighted()
 			attrs = {
 				NSFontAttributeName: NSFont.systemFontOfSize_(13),
-				NSForegroundColorAttributeName: NSColor.colorWithCalibratedWhite_alpha_(1.0 if hi else 0.0, 1.0),
+				NSForegroundColorAttributeName: NSColor.whiteColor() if hi else NSColor.labelColor(),
 				NSParagraphStyleAttributeName: para,
 			}
 			nsStr = NSString.stringWithString_(str(val))
@@ -458,7 +459,8 @@ try:
 			drawRect = ((frame.origin.x + 4, ty), (frame.size.width - 8, textSize.height))
 			nsStr.drawInRect_withAttributes_(drawRect, attrs)
 except objc.error:
-	_SJTitleCell = objc.lookUpClass("_SJTitleCell")
+	pass
+_SJTitleCell = objc.lookUpClass("_SJTitleCell_v5")
 
 
 try:
