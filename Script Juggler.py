@@ -29,12 +29,13 @@ from AppKit import (
 	NSString, NSFont, NSForegroundColorAttributeName,
 	NSFontAttributeName, NSParagraphStyleAttributeName,
 	NSMutableParagraphStyle, NSLeftTextAlignment, NSRightTextAlignment,
+	NSPasteboard,
 )
 from Foundation import (
 	NSObject,
 	NSPropertyListSerialization,
 	NSPropertyListXMLFormat_v1_0,
-	NSData, NSURL,
+	NSData, NSURL, NSIndexSet,
 )
 import GlyphsApp as _GlyphsAppModule
 from GlyphsApp import Glyphs
@@ -289,22 +290,31 @@ _SJToolTipDelegate = None
 
 try:
 	class _SJCollectTipDelegate(NSObject):
-		"""Provides per-row tooltips in CollectWindow showing script __doc__."""
+		"""Provides per-row tooltips in CollectWindow showing script __doc__ via cell tooltips."""
 		_window = None
 		_originalDelegate = None
 
-		def tableView_toolTipForCell_rect_tableColumn_row_mouseLocation_(
-			self, tableView, cell, rect, tableColumn, row, mouseLocation
+		def tableView_willDisplayCell_forTableColumn_row_(
+			self, tableView, cell, tableColumn, row
 		):
+			# Set the tooltip on the cell itself, using __doc__ if available
 			if self._window and 0 <= row < len(self._window._filtered):
 				s = self._window._filtered[row]
 				tip = s.get("doc") or s.get("displayPath", "")
-			else:
-				tip = ""
-			return tip  # ObjC bridge requires (string, NSRect)
+				try:
+					cell.setToolTip_(tip)
+				except Exception:
+					pass
+			# Forward to original delegate if it implements this method
+			if self._originalDelegate and self._originalDelegate.respondsToSelector_(
+				"tableView:willDisplayCell:forTableColumn:row:"
+			):
+				self._originalDelegate.tableView_willDisplayCell_forTableColumn_row_(
+					tableView, cell, tableColumn, row
+				)
 
 		def respondsToSelector_(self, sel):
-			if str(sel) == "tableView:toolTipForCell:rect:tableColumn:row:mouseLocation:":
+			if str(sel) == "tableView:willDisplayCell:forTableColumn:row:":
 				return True
 			if self._originalDelegate:
 				return self._originalDelegate.respondsToSelector_(sel)
@@ -337,15 +347,41 @@ try:
 			"tableView:pasteboardWriterForRow:",
 			"tableView:validateDrop:proposedRow:proposedDropOperation:",
 			"tableView:acceptDrop:row:dropOperation:",
+			"tableView:writeRowsWithIndexes:toPasteboard:",
 		})
-
 		# ── drag source: write each row index into its own pasteboard item ──────
 
 		def tableView_pasteboardWriterForRow_(self, tableView, row):
 			item = NSPasteboardItem.alloc().init()
 			item.setString_forType_(str(row), _DRAG_TYPE)
 			return item
+		
+		def tableView_writeRowsWithIndexes_toPasteboard_(self, tableView, indexSet, pboard):
+			"""
+			Old-style drag source API used by NSTableView.
+			Put the dragged row indexes onto the pasteboard under our custom type.
+			"""
+			# Collect all row indices from the NSIndexSet
+			rows = []
+			idx = indexSet.firstIndex()
+			while idx != NSNotFound:
+				rows.append(idx)
+				idx = indexSet.indexGreaterThanIndex_(idx)
 
+			if not rows:
+				return False
+
+			# Encode as a simple comma-separated string of row numbers
+			rowString = ",".join(str(i) for i in rows)
+
+			# Declare our custom type and write the data
+			pboard.clearContents()
+			pboard.declareTypes_owner_([_DRAG_TYPE], None)
+			pboard.setString_forType_(rowString, _DRAG_TYPE)
+
+			return True
+			
+			
 		# ── drag destination: validate ──────────────────────────────────────────
 
 		def tableView_validateDrop_proposedRow_proposedDropOperation_(
@@ -357,20 +393,34 @@ try:
 		# ── drag destination: accept ────────────────────────────────────────────
 
 		def tableView_acceptDrop_row_dropOperation_(self, tableView, info, row, operation):
-			pasteboardItems = info.draggingPasteboard().pasteboardItems()
-			if not pasteboardItems:
-				return False
-			sourceRows = sorted(
-				int(pbItem.stringForType_(_DRAG_TYPE))
-				for pbItem in pasteboardItems
-				if pbItem.stringForType_(_DRAG_TYPE) is not None
-			)
+			pboard = info.draggingPasteboard()
+			pasteboardItems = pboard.pasteboardItems()
+			sourceRows = []
+
+			# New API: items from pasteboardWriterForRow_
+			if pasteboardItems:
+				sourceRows = sorted(
+					int(pbItem.stringForType_(_DRAG_TYPE))
+					for pbItem in pasteboardItems
+					if pbItem.stringForType_(_DRAG_TYPE) is not None
+				)
+			else:
+				# Old API: single string with comma-separated indices
+				s = pboard.stringForType_(_DRAG_TYPE)
+				if s:
+					try:
+						sourceRows = sorted(int(x) for x in s.split(",") if x.strip())
+					except ValueError:
+						sourceRows = []
+
 			if not sourceRows:
 				return False
+
 			if self._juggler:
 				self._juggler._moveRows(sourceRows, row)
+			
 			return True
-
+			
 		# ── forwarding ──────────────────────────────────────────────────────────
 
 		def respondsToSelector_(self, sel):
@@ -544,10 +594,10 @@ class CollectWindow:
 			rowHeight=22,
 			autohidesScrollers=False,
 		)
-		self.w.scriptList.getNSTableView().setToolTip_(
-			"Select scripts to add. Double-click or press Collect to add them."
-		)
-
+		# Remove generic view tooltip so per-row __doc__ tooltips can show
+		# self.w.scriptList.getNSTableView().setToolTip_(
+		# 	"Select scripts to add. Double-click or press Collect to add them."
+		# )
 		# Install tooltip delegate for collect window (shows __doc__)
 		self._collectTipDelegate = _SJCollectTipDelegate.alloc().init()
 		self._collectTipDelegate._window = self
