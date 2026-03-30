@@ -1276,6 +1276,15 @@ class ScriptJuggler:
 	# ── preset: save ──────────────────────────────────────────────────────────
 
 	def _savePreset(self, sender=None):
+		def localPath(path):
+			absolute = os.path.abspath(path)
+			home = os.path.expanduser("~")
+			if absolute.startswith(home):
+				localized = "~" + absolute[len(home):]
+			else:
+				localized = absolute
+			return localized
+			
 		panel = NSSavePanel.savePanel()
 		panel.setTitle_("Save Script Juggler Preset")
 		panel.setAllowedFileTypes_(["plist"])
@@ -1293,12 +1302,12 @@ class ScriptJuggler:
 
 		presetData = [
 			{
-				"path": e["path"],
-				"title": e["title"],
-				"displayPath": e["displayPath"],
-				"done": e.get("done", False),
+				"path": localPath(entry["path"]),
+				"title": entry["title"],
+				"displayPath": entry["displayPath"],
+				"done": entry.get("done", False),
 			}
-			for e in self.entries
+			for entry in self.entries
 		]
 
 		plistData, error = NSPropertyListSerialization.dataWithPropertyList_format_options_error_(
@@ -1341,7 +1350,7 @@ class ScriptJuggler:
 		if presetData:
 			self.entries = [
 				{
-					"path": str(item.get("path", "")),
+					"path": os.path.expanduser(str(item.get("path", ""))),
 					"title": str(item.get("title", "")),
 					"displayPath": str(item.get("displayPath", "")),
 					"done": bool(item.get("done", False)),
