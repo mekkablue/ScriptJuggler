@@ -1062,6 +1062,18 @@ class ScriptJuggler:
 		self.w.scriptList.setSelection(selection)
 		self._markChanged()
 
+	def _markAllDone(self, sender=None):
+		for entry in self.entries:
+			entry["done"] = True
+		self._refreshList()
+		self._markChanged()
+
+	def _markAllUndone(self, sender=None):
+		for entry in self.entries:
+			entry["done"] = False
+		self._refreshList()
+		self._markChanged()
+
 	def _moveSelectedUp(self):
 		"""Cmd-Up: shift selected rows one position upward."""
 		selection = sorted(self.w.scriptList.getSelection())
@@ -1260,6 +1272,9 @@ class ScriptJuggler:
 		menu.setAutoenablesItems_(False)
 		menu.addItem_(makeNSMenuItem("Save Preset", self._savePreset))
 		menu.addItem_(makeNSMenuItem("Load Preset", self._loadPreset))
+		menu.addItem_(NSMenuItem.separatorItem())
+		menu.addItem_(makeNSMenuItem("Mark All as Done", self._markAllDone, enabled=bool(self.entries)))
+		menu.addItem_(makeNSMenuItem("Mark All as Undone", self._markAllUndone, enabled=bool(self.entries)))
 		menu.addItem_(NSMenuItem.separatorItem())
 		menu.addItem_(makeNSMenuItem("Clear List", self._clearEntries, enabled=bool(self.entries)))
 
